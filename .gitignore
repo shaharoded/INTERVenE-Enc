@@ -1,0 +1,18 @@
+# Ignore specific files
+emr_model.zip
+
+# Ignore an entire folder
+venv/
+.venv/
+tmp-docs/
+__pycache__/
+checkpoints/
+transform_emr_temp/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+docs/
+smoke.log
+
+data/
+checkpoints/
