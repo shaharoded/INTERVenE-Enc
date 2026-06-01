@@ -89,7 +89,8 @@ If a loss trace or `diagnose.py` output suggests an HP is *misconfigured*
 for the current architecture (e.g. dropout=0 leaves pool entropy saturated;
 LR is so high that auxes diverge), file the observation as a note in
 `status.md` and revisit it in Phase 2 against the locked architecture.
-Don't fork the Phase-1 sweep to chase it.
+Don't fork the Phase-1 sweep to chase it. only if it's a very extreme "missrepresentaion"
+of the current architecture you are trying, then you may try a HP modification experiment. But never to "explore". 
 
 Run the listed directions in order. The agent must also propose **new
 directions** of its own based on observation:
@@ -307,7 +308,7 @@ That's the publishable result.
    why the direction was abandoned.
 10. KEEP → cp -r checkpoints checkpoints.bak_keep_<tag>.
     Run an ablation that strips the new change → confirms gain attribution.
-11. After each KEEP, re-eval the running best at 10k to refresh baseline.
+11. After each KEEP, re-eval the running best at 10k to refresh baseline (if not already produced by the eval that produced the KEEP).
 12. FULL-DATA CONFIRM (sample=None) is reserved for Phase 2 / Phase 3.
 ```
 
