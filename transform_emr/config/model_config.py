@@ -1,0 +1,143 @@
+import os
+
+# Get project root (2 levels up from config/)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+
+# Checkpoint paths
+CHECKPOINT_PATH = os.path.join(PROJECT_ROOT, 'checkpoints')
+PHASE1_CHECKPOINT = os.path.join(CHECKPOINT_PATH, 'phase1', 'ckpt_best.pt')
+PHASE2_CHECKPOINT = os.path.join(CHECKPOINT_PATH, 'phase2', 'ckpt_best.pt')
+PHASE3_CHECKPOINT = os.path.join(CHECKPOINT_PATH, 'phase3', 'ckpt_best.pt')
+
+# Global RNG seed — applied via utils.set_seed() in every model constructor and
+# training-phase entry point so runs are reproducible (removes the init/training-
+# stochasticity confound). Vary this for the multi-seed confidence study (Step 5).
+SEED = 42
+
+MODEL_CONFIG = {
+      "time2vec_dim": 32,
+      "embed_dim": 128,   # WINNER M-128 (head_dim=64, n_head=2) — SEEDED re-run @ patience 5 = inference/QA platform
+      "n_head": 2,
+      "n_layer": 4,
+      "dropout": 0.1,
+      "bias": True,
+    }
+
+TRAINING_SETTINGS = {
+    "phase1_n_epochs": 100,
+    "phase2_n_epochs": 100,
+    "phase3_n_epochs": 100,
+    "sample": None,  # P6 M-128 FULL-DATA sweep (57078 patients). Smoke: 50 + epochs 1. 10k probe: 10000.
+
+    # Phase-2 optimizer LR warmup (OneCycleLR pct_start).
+    # This controls optimizer step size ramp-up, not auxiliary-loss lambda warmup.
+    "lr_warmup_epochs": 5,
+    "early-stop-patience": 5,  # reverted 15->5 (original locked). patience=15 ablation (M-128-rerun-p15) gave WORSE AUROC+honesty (Phase-3 overtrained to cap) though confounded by unseeded init; 5 is the locked default + best-observed. Now reproducible via SEED.
+    "early-stop-min-delta-rel": 1e-3,  # relative improvement threshold (0.1%)
+
+    "phase1_learning_rate": 3e-4,
+    "phase2_learning_rate": 3e-4,
+    "phase3_learning_rate":       1e-4,
+    "phase3_backbone_lr_factor":  0.01,  # backbone LR = phase3_lr * factor (1e-6); 0.0 = fully frozen
+    "phase3_weight_decay":        1e-3,  # weight decay for outcome_head in P3 (matches backbone)
+    "weight_decay": 1e-3,
+
+    "batch_size": 16, # Number of patients processed concurrently (effective batch=64 via grad accumulation)
+    "grad_accumulation_steps": 4, # Accumulate gradients over N steps before optimizer.step()
+    "phase1_bce_window_hours": 3.0,
+    # Soft-kernel horizon for the Phase-2 LM-head BCE. The kernel decay constant
+    # tau is learnable per token class (model.log_tau_lm); this value is both the
+    # init for terminal tokens and the hard outer horizon beyond which the kernel
+    # contribution is zero.
+    "phase2_terminal_bce_window_hours": 168.0,
+
+    # Phase-1 auxiliary scheduler.
+    # Single stage: dt activates after bce_only_epochs of pure BCE training.
+    # Lambda max is calibrated ONCE from training losses at the first active epoch,
+    # then kept fixed. Weighted contribution is capped to `fraction` of training BCE.
+    "phase1_scheduler": {
+        "bce_only_epochs": 3,     # Run BCE alone first so calibration uses a trained model
+        "aux_fraction_caps": {
+            "dt":  0.40,  # Time regression auxiliary capped to 40% of BCE at calibration epoch
+        },
+        "order": [["dt"]],  # Single stage: dt active after bce_only_epochs
+        "ramp_epochs": {
+            "dt":  0,
+        },
+    },
+
+    # Phase-2 auxiliary scheduler.
+    # Multi-stage curriculum: stages unlock sequentially based on plateau detection.
+    #   Stage 0: [ce, dt, ttt] — active after bce_only_epochs, ramp immediately
+    #     'ttt' (direction C — time-to-terminal regression): joined to stage 0
+    #     alongside dt because it's a foundational time-prediction signal
+    #     (MSE on log1p hours-to-next-terminal, computed at every non-terminal,
+    #     non-pad query position). fraction_cap 0.30 sits between dt's 0.50 and
+    #     ranking's 0.20 — meaningful share of BCE without dominating.
+    #   Stage 1: [ranking] — unlocked when stage-0 objectives plateau (after ramp)
+    # Plateau is measured on vl_total (total weighted validation loss) and only checked
+    # once the current stage's ramp has completed.
+    # Warmup ends after the ranking ramp completes (dynamic, set by scheduler).
+    "phase2_scheduler": {
+        "bce_only_epochs": 4,
+        "aux_fraction_caps": {
+            "ce":      0.50,    # Next-token CE nudge cap
+            "dt":      0.50,    # Time regression cap
+            "ranking": 0.20,    # Pairwise AUROC-proxy ranking loss on the outcome head
+            "ttt":     0.30,    # Time-to-terminal regression cap (direction C)
+        },
+        "order": [["ce", "dt", "ttt"], ["ranking"]],
+        "ramp_epochs": {
+            "ce":      0,
+            "dt":      0,
+            "ranking": 3,  # Gradual ramp avoids destabilising the backbone when stage 1 unlocks
+            "ttt":     0,
+        },
+        "plateau_min_delta": 1e-3,
+        "plateau_patience":  [2],  # Patience per transition: [0→1]
+    },
+
+    # Outcome head — time-decayed soft labels.
+    # For each position t the target for outcome k is:
+    # sum_s { exp(-dt(t,s) / tau_k) * 1[token_s == outcome_k] }.clamp(0, 1)
+    # tau_k is a per-outcome learnable parameter (model.outcome_log_tau), initialised
+    # at log(12 / 336). outcome_horizon_hours hard-zeros any contribution beyond that
+    # horizon (kept in sync with the eval window family).
+    "outcome_horizon_hours": 48.0,
+
+    # P4 — patient-level attention pool head (Phase 3 only).
+    # Per-outcome learnable query embeddings cross-attend over the backbone's
+    # final hidden states to produce one pooled feature per (patient, outcome).
+    # A scalar projection turns each pooled feature into a patient-level
+    # logit; BCE against patient_label[b, k] = "outcome k appears anywhere in
+    # the non-pad GT trajectory". λ_pool calibrated once at the end of
+    # Phase-3 epoch 1, capped at this fraction of raw outcome BCE — same
+    # regime as ranking. Pool head trains at Phase-3 head LR; its gradient
+    # flows through the hidden-state stash into the backbone at
+    # backbone_lr_factor=0.01, protecting the outcome head from patient-level
+    # coarseness.
+    "phase3_pool_fraction_cap": 0.05,   # I2 P4-tight: lowered 0.20 -> 0.05
+
+    # --- BERT-pivot Phase-2 settings ---
+    # MLM ratio applied per batch (BERT-default 15%; ramped from 0 over
+    # bce_only_epochs).
+    "phase2_mlm_ratio": 0.15,
+    # Atomic-interval mask replacement strategy.
+    #   "positional"   — three generic tokens ([MASK], [MASK_INTERVAL_START/END]).
+    #   "hierarchical" — per-family [MASK_RAW_<family>] for non-interval tokens
+    #                    so the encoder still sees which raw concept was masked.
+    #                    Tokenizer auto-emits the family specials at build time.
+    "phase2_mlm_mask_mode": "positional",
+    # Phase-2 aux-loss fraction caps.  Sit alongside the MLM main loss inside
+    # the same LambdaScheduleController used in the AR pipeline so behaviour is
+    # familiar — t_pos mirrors the original `dt` cap (0.40) and t_local mirrors
+    # the `ttt` cap (0.30) since both are time-regression auxiliaries.
+    "phase2_t_pos_cap":   0.40,
+    "phase2_t_local_cap": 0.30,
+
+    # --- BERT-pivot Phase-3 settings ---
+    # Time-head novelty: per-outcome MAE is part of the headline; weight it
+    # high enough that the smooth-L1 keeps pace with the risk BCE.
+    "phase3_time_lambda": 0.5,
+    "phase3_head_hidden": 256,
+}

@@ -1,0 +1,53 @@
+Copyright © 2025 Shahar Oded
+
+All rights reserved.
+
+This repository contains research code developed as part of a graduate thesis titled:
+
+"Predicting Clinical Outcomes and Assessing the Effects of Compliance to Diabetes Care Guidelines in Hospitals Using Time-Dependent Machine Learning Methods"
+by Shahar Oded, Ben-Gurion University of the Negev.
+
+──────────────────────────────────────────────────────────────
+
+Pre-Publication Terms (Before Official Thesis/Article Release):
+
+This code is under a restricted license. Redistribution, commercial use, or derivative works are NOT permitted at this time.
+
+You may:
+
+Read and review the code  
+Use it internally for non-commercial research evaluation  
+Not redistribute or publish any derivative works  
+Not use this code or models in any commercial, clinical, or production setting  
+
+──────────────────────────────────────────────────────────────
+
+Post-Publication Terms (Once the associated paper is released):
+
+Upon official publication of the associated thesis or article, this code will be licensed under the following terms:
+
+- License: Creative Commons Attribution-NonCommercial 4.0 (CC BY-NC 4.0)  
+- You may share and adapt the code **for non-commercial purposes only**  
+- You **must give appropriate credit** and include a link to the license  
+- You **must cite the associated paper** in any academic publication or derivative work
+
+Please cite:
+
+> Shahar Oded. "Predicting Clinical Outcomes and Assessing the Effects of Compliance to Diabetes Care Guidelines in Hospitals Using Time-Dependent Machine Learning Methods." Master's Thesis, Ben-Gurion University of the Negev, 2025. https://github.com/shaharoded/Transform-EMR
+
+BibTeX:
+@thesis{Oded2025emrtransformer,
+  author    = {Shahar Oded},
+  title     = {Predicting Clinical Outcomes and Assessing the Effects of Compliance to Diabetes Care Guidelines in Hospitals Using Time-Dependent Machine Learning Methods},
+  school    = {Ben-Gurion University of the Negev},
+  year      = {2025},
+  note      = {Available at https://github.com/shaharoded/Transform-EMR}
+}
+
+──────────────────────────────────────────────────────────────
+
+To inquire about commercial licensing or collaborations, contact:
+
+📧 shahar6771@gmail.com
+
+──────────────────────────────────────────────────────────────
