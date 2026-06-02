@@ -1,0 +1,1 @@
+tag	timestamp	sample	patient_auprc_weighted	patient_auroc_weighted	patient_auprc_simple	patient_auroc_simple	patient_max_f1_weighted	length_of_stay_mae_hours	time_mae_weighted_hrs	phase2_best_val	phase3_best_val	phase2_epochs	phase3_epochs	embed_dim	n_layer	n_head	num_params	total_seconds	notes

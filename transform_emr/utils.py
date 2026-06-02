@@ -77,7 +77,9 @@ def _ensure_tee_active():
         return
     # Tee log goes to /tmp (local fs) — the workspace mfs has intermittent OSError [Errno 5]
     # that crashes training mid-run. stdout redirect to /tmp/run.log already captures everything.
-    log_path = "/tmp/training.log"
+    # Per-uid filename so a stale root-owned /tmp/training.log from a prior run does not
+    # block this process with PermissionError.
+    log_path = f"/tmp/training_{os.getuid()}.log"
     _active_tee = _TeeStream(log_path, sys.stdout)
     sys.stdout = _active_tee
     print(f"[Logger] Logging to: {log_path}")

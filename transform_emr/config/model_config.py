@@ -27,7 +27,7 @@ TRAINING_SETTINGS = {
     "phase1_n_epochs": 100,
     "phase2_n_epochs": 100,
     "phase3_n_epochs": 100,
-    "sample": None,  # Smoke: 50 + epochs 1.  Phase-1 probe: 10000.  Phase-2 confirm: None (full data).
+    "sample": 10000,  # Smoke: 50 + epochs 1.  Phase-1 probe: 10000.  Phase-2 confirm: None (full data).
 
     # Phase-2 optimizer LR warmup (OneCycleLR pct_start).
     # This controls optimizer step size ramp-up, not auxiliary-loss lambda warmup.
