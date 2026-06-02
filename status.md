@@ -346,3 +346,14 @@ driver for KEEP decisions; all KEEP-decision runs stay on full `api.py`.** Side
 note: the 0.034 spread hints run-to-run variance may be ~0.02–0.03 AUPRC, so I
 treat AUPRC deltas < ~0.02 as noise (the big KEEPs so far, +0.066/+0.074, are
 well clear of that). Full data = 57,078 patients (~5.7× the 10k sample).
+
+### i4c-tl002  (direction #4c: phase3_time_lambda 0.05 → 0.02 — confirm optimum)
+
+**Hypothesis.** AUPRC trend over λ {0.5,0.25,0.05} = {0.687,0.760,0.826} is
+monotonic-up but decelerating (+0.074 then +0.066). Test λ=0.02 to find the
+optimum/plateau and try to crack AUROC 0.90 (currently 0.881). KEEP needs AUPRC
+≥ +0.010 over i4b-tl005 (0.826) with time MAE within +5h of 39.0h and no LoS
+blowup; watch risk-logit calibration (already std ~10 at λ=0.05). If it plateaus
+or regresses, λ=0.05 is locked as the time-λ winner.
+
+**Change.** `phase3_time_lambda` 0.05 → 0.02 (code committed separately).
