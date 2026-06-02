@@ -16,8 +16,8 @@ SEED = 42
 
 MODEL_CONFIG = {
       "time2vec_dim": 32,
-      "embed_dim": 128,   # M-128 starting point (head_dim=64, n_head=2); grow during the size sweep.
-      "n_head": 2,
+      "embed_dim": 256,   # size sweep: head_dim=64, n_head=4
+      "n_head": 4,
       "n_layer": 4,
       "dropout": 0.1,
       "bias": True,
