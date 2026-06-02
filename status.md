@@ -197,3 +197,18 @@ is the problem, not the ratio. Two live options:
   push gradient toward risk and lift AUROC/AUPRC. Leaning (b) given the AUROC gap
   is the real goal and #1's mode arm just failed; will try ratio 0.25 only if (b)
   also stalls.
+
+### i4-tl025  (direction #4: Phase-3 time λ 0.5 → 0.25)
+
+**Hypothesis.** Baseline diagnose shows the Phase-3 objective is Time-dominated:
+raw smooth-L1 Time≈7.86 × λ0.5 = 3.93 vs Risk BCE 0.46 (~8.6:1). The risk and
+time heads share the pool + shared-MLP + backbone, so a time-dominated gradient
+plausibly under-trains risk discrimination. Lowering `phase3_time_lambda`
+0.5→0.25 (→ ~4.3:1) should shift gradient toward risk and lift
+`patient_auroc_weighted` (gap to 0.90) and/or `patient_auprc_weighted`
+(target +0.010 past 0.687), at the risk of worse time MAE (must stay within +5h
+to KEEP). Phase-3-only change; Phase-1 reused, Phase-2 identical to baseline
+(retrained because api.py always clears phase2/3 — deterministic, reproduces baseline P2).
+
+**Change.** `transform_emr/config/model_config.py`: `phase3_time_lambda`
+`0.5` → `0.25`. (Committed separately from the journal so a DISCARD reverts cleanly.)
