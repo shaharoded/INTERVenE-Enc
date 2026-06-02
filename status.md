@@ -212,3 +212,58 @@ to KEEP). Phase-3-only change; Phase-1 reused, Phase-2 identical to baseline
 
 **Change.** `transform_emr/config/model_config.py`: `phase3_time_lambda`
 `0.5` → `0.25`. (Committed separately from the journal so a DISCARD reverts cleanly.)
+
+**Smoke result.** sample=50: P3 total = Risk + 0.25·Time = 22.04 (vs 43.05 at
+λ0.5), confirming λ applied; no NaN/inf; summary + headline keys print → Gate-A/D
+PASS. Phase-1 reused; Phase-2 reproduced baseline (positional@0.15, det. seed).
+
+**Headline metrics (10k) vs baseline (= running best so far).**
+```
+                            i4-tl025     baseline     Δ
+patient_auprc_weighted:     0.760241     0.686507    +0.0737  (PRIMARY, huge KEEP)
+patient_auroc_weighted:     0.868612     0.846871    +0.0217  (also > +0.010)
+patient_auprc_simple:       0.639949     0.566331    +0.0736
+patient_max_f1_weighted:    0.735542     0.706229    +0.0293
+length_of_stay_mae_hours:   120.2743     121.4905    -1.22 h
+time_mae weighted (6 risk): 41.40 h      41.71 h     -0.31 h  (FLAT — no time cost)
+phase3_best_val:            1.476722     4.238167             (lower total, smaller λ)
+```
+Per-outcome AUROC / AUPRC Δ (vs baseline):
+| outcome | AUROC | AUPRC | ΔAUPRC |
+|---|---|---|---|
+| CARDIO-VASCULAR | 0.960 (+0.105) | 0.703 | **+0.328** |
+| HYPEROSMOLALITY | 0.897 (+0.061) | 0.891 | **+0.191** |
+| KIDNEY | 0.856 (+0.011) | 0.765 | +0.069 |
+| DISGLYCEMIA_Hyperglycemia | 0.914 (−0.007) | 0.916 | −0.007 |
+| DISGLYCEMIA_Hypoglycemia | 0.818 (+0.002) | 0.347 | −0.100 |
+| DEATH | 0.675 (−0.016) | 0.218 | −0.040 |
+The two rare/hard heads (Hypoglycemia, DEATH) regressed modestly; everything else
+jumped. Net weighted AUPRC +0.074. Time MAE essentially unchanged → the time head
+is robust to weight reduction (it converges regardless), so the time term WAS
+purely starving risk, exactly as hypothesised.
+
+**Per-aux training trace (P3).**
+| phase | term | λ | anchor raw | final raw | note |
+|---|---|---|---|---|---|
+| P3 | Risk (main) | — | 0.98 | ~0.45 | sharper logits (DEATH std 3.74→5.87) |
+| P3 | Time (smooth-L1) | 0.25 | 84→ | ~4.1 | weighted ~1.0; still ~2:1 time-dominant at convergence |
+(P1 dt, P2 t_pos/t_local identical to baseline — same upstream config.)
+
+**Diagnose.py (positional p=0.15) vs baseline.**
+- MLM top1=0.089 / top5=0.303 — unchanged (Phase-2 identical), as expected.
+- Risk logits WIDER: DEATH std 3.74→5.87, Hyperglyc 4.99→5.84, Kidney 3.19→3.65
+  — sharper risk discrimination, directly explains the AUPRC/AUROC lift.
+- t_pos std 0.037 (was 0.028 — backbone drifted slightly under longer/risk-weighted
+  P3 fine-tune), t_local std 0.021 — both alive. Pool entropy 4.66–5.32, healthy.
+
+**Verdict.** KEEP — primary AUPRC +0.0737 (≫ +0.010) and AUROC +0.0217, no headline
+regresses (time MAE flat, LoS −1.2h). New running-best. Gain cleanly attributed:
+the ONLY change vs baseline is `phase3_time_lambda` 0.5→0.25 (Phase-1/2 identical),
+so the baseline IS the strip-the-change ablation.
+
+**What I'd try next.** Convergence math says even at λ=0.25 the P3 objective is
+still ~2:1 TIME-dominant (risk ~0.45 vs weighted-time ~1.0). Per supervisor
+directive ("risk loss higher than time — invert the two"), next run i4b sets
+`phase3_time_lambda`=0.05 → weighted-time ~0.2 vs risk ~0.45 (~2:1 RISK-dominant).
+Hypothesis: further AUPRC/AUROC lift toward AUROC 0.90; watch time MAE for the −5h
+guardrail (robust so far). If 0.05 overshoots (time MAE blows up), 0.1 is the fallback.
