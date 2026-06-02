@@ -495,3 +495,16 @@ targets (AUPRC ≫ 0.65; AUROC ≈ 0.90). Time prediction reasonable and stable.
 Directions #1 (mask granularity) discarded; #2/#3 not indicated by diagnostics
 (no MLM-collapse; P2 time auxes clamp-limited so cap edits are no-ops); #5
 discarded; #6/#7 not indicated (head/pool diagnostics healthy).
+
+### p2-fulldata  (PHASE 2 step 1: full-data baseline, sample=None, locked recipe)
+
+**Hypothesis.** Re-run the Phase-1-locked architecture (only change vs original
+baseline: phase3_time_lambda=0.02) on the FULL dataset (57,078 patients vs the
+10k probe) to produce the deliverable headline. Expect metrics to hold or improve
+with ~5.7× more data (less overfit, sharper heads), especially the rare/weak
+outcomes (DEATH, CVD, Hypoglycemia) that were data-starved at 10k. This is the
+publishable baseline before the size sweep.
+
+**Change.** `sample` 10000 → None (full data). Architecture identical to locked
+recipe. Tokenizer/Phase-1/scaler rebuilt from scratch (full-data vocab differs),
+so all checkpoints cleared first. Long run (P1+P2+P3 on 57k patients).
