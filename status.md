@@ -430,3 +430,17 @@ direction #5 `phase3_backbone_lr_factor` 0.01→0.1 (playbook flags default may 
 too low; lets the backbone specialise more for the task in P3) with λ=0.02 locked.
 If no-KEEP → 2nd consecutive no-KEEP → Phase-1 converged → proceed to Phase-2
 full-data baseline with the locked recipe.
+
+### i5-blr01  (direction #5: phase3_backbone_lr_factor 0.01 → 0.1; λ=0.02 locked)
+
+**Hypothesis.** Playbook flags the default backbone_lr_factor=0.01 as possibly too
+low for an encoder that must specialise its representation for outcome prediction
+(BERT fine-tune literature uses ~0.1). At 0.1 the backbone (and embedder, which
+shares this factor in P3) adapt 10× faster during Phase-3, which — now that P3 is
+risk-dominant (λ=0.02) — could push risk discrimination further and crack AUROC
+clearly past 0.90. Risk: overfit on the 10k budget (watch train/val gap and
+calibration). KEEP needs AUPRC ≥ +0.010 over i4c (0.841) with no time-MAE/LoS
+blowup. If no-KEEP → 2nd consecutive no-KEEP → Phase-1 converged.
+
+**Change.** `phase3_backbone_lr_factor` 0.01 → 0.1 (code committed separately).
+Time-λ stays at the locked 0.02.
