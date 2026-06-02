@@ -569,3 +569,18 @@ for size-sweep reuse).
 **What I'd try next.** Size sweep (embed_dim 256, then 384 — capped per supervisor),
 reusing the processed_datasets cache (data load is instant; only P1/P2/P3 retrain).
 Pick smallest within ~0.005 weighted AUPRC of best, then bootstrap-CI the winner.
+
+### p2-size256  (PHASE 2 size sweep: embed_dim 256, n_head 4; locked recipe)
+
+**Hypothesis.** Scale embed_dim 128→256 (n_head 2→4, head_dim 64 fixed, n_layer 4)
+on full data with the locked recipe (phase3_time_lambda=0.02). More capacity may
+lift weighted AUPRC/AUROC, especially the harder heads (DEATH, Hypoglycemia). KEEP
+only if it beats the 128 baseline (AUPRC 0.826, CI [0.821,0.832]) by a margin
+clearly outside the bootstrap CI (~+0.01); else prefer the smaller 128 for the
+publishable headline (size-sweep rule: smallest within ~0.005 AUPRC of best).
+Capped at 384 per supervisor.
+
+**Change.** MODEL_CONFIG embed_dim 128→256, n_head 2→4. Reuses processed_datasets
+cache (key ignores embed_dim → instant data load); Phase-1 retrains for the new
+dim; Phase-2/3 retrain. Smoke clobbers tokenizer/scaler → restored from the
+p2_full128 backup before the full run.
