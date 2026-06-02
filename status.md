@@ -331,3 +331,18 @@ Gain attributed: only `phase3_time_lambda` changed vs i4-tl025.
 ~25min) to find the optimum / plateau; watch risk-logit calibration and time MAE.
 DEATH remains intrinsically hard — defer (could try outcome-specific pos_weight or
 a focal risk loss later, but not the headline lever).
+
+### NOTE — retrain_phase3.py fast driver REJECTED (methodology)
+
+Built `retrain_phase3.py` to skip the redundant identical Phase-2 retrain
+(~53 min/run) for Phase-3-only experiments. **Validation failed**: at λ=0.25 with
+i4-tl025's staged Phase-1/Phase-2 it produced AUPRC 0.7260 / AUROC 0.8520 and
+Phase-3 early-stopped at ep73, vs the full api.py i4-tl025 result 0.7602 / 0.8686
+at ep101 — a 0.034 AUPRC gap. Cause: the bucket sampler shuffles with python
+`random` each epoch, so Phase-3's data order depends on the RNG state left by
+Phase-2 training; skipping Phase-2 changes that order (plus non-deterministic GPU
+kernels, amplified by early-stop epoch choice). **Decision: do NOT use the fast
+driver for KEEP decisions; all KEEP-decision runs stay on full `api.py`.** Side
+note: the 0.034 spread hints run-to-run variance may be ~0.02–0.03 AUPRC, so I
+treat AUPRC deltas < ~0.02 as noise (the big KEEPs so far, +0.066/+0.074, are
+well clear of that). Full data = 57,078 patients (~5.7× the 10k sample).
