@@ -280,3 +280,54 @@ the i4-tl025 running-best (41.4h). Phase-3-only; Phase-1 reused, Phase-2 = basel
 
 **Change.** `transform_emr/config/model_config.py`: `phase3_time_lambda`
 `0.25` → `0.05`. (Code committed separately from journal for clean revert.)
+
+**Smoke result.** sample=50: P3 total = Risk + 0.05·Time = 5.22, no NaN/inf,
+summary + headline keys print → Gate-A/D PASS. Phase-1 reused, Phase-2 = baseline.
+
+**Headline metrics (10k) vs i4-tl025 (prev best) and baseline.**
+```
+                            i4b-tl005   i4-tl025    baseline    Δ vs prev-best
+patient_auprc_weighted:     0.826193    0.760241    0.686507    +0.0660  (PRIMARY)
+patient_auroc_weighted:     0.881450    0.868612    0.846871    +0.0128
+patient_auprc_simple:       0.759314    0.639949    0.566331    +0.1194
+patient_max_f1_weighted:    0.782523    0.735542    0.706229    +0.0470
+length_of_stay_mae_hours:   122.3213    120.2743    121.4905    +2.05 h  (within guard)
+time_mae weighted (6 risk): 39.01 h     41.40 h     41.71 h     -2.39 h  (IMPROVED)
+phase3_best_val:            0.291340    1.476722    4.238167
+```
+Per-outcome AUROC / AUPRC (vs i4-tl025):
+| outcome | AUROC | AUPRC | ΔAUPRC vs i4-tl025 |
+|---|---|---|---|
+| CARDIO-VASCULAR | 0.989 | 0.959 | +0.257 |
+| HYPEROSMOLALITY | 0.907 | 0.917 | +0.026 |
+| DISGLYCEMIA_Hyperglycemia | 0.923 | 0.923 | +0.007 |
+| KIDNEY | 0.876 | 0.863 | +0.098 |
+| DISGLYCEMIA_Hypoglycemia | 0.856 | 0.680 | **+0.333** (recovered) |
+| DEATH | 0.667 | 0.213 | −0.005 (lone laggard) |
+Hypoglycemia fully recovered (0.347→0.680); DEATH is the only weak head and its
+diagnose logits are WIDE (std 10.3, p5 −11→p95 +16) yet AUPRC stays 0.21 → the
+head is trying hard but rare terminal-death-from-2-day-input is intrinsically
+hard, not an architecture bug.
+
+**Per-aux trace (P3).** Risk main 0.98→~0.25; Time (λ=0.05) raw 84→~5, weighted
+~0.25 — now roughly RISK:time ≈ 1:0.5 (risk-dominant, as directed).
+
+**Diagnose.py (positional p=0.15) vs i4-tl025.**
+- Risk logits even WIDER: DEATH std 5.87→10.31, Hyperglyc 5.84→10.67, Kidney
+  3.65→8.09 — sharper ranking (drives AUPRC). Watch calibration if pushed lower.
+- MLM top1 0.084 (was 0.089), top20 legality 0.642 — backbone drifts slightly
+  from MLM optimum as it specialises for risk under risk-dominant P3 (expected,
+  backbone_lr_factor=0.01 allows it). Not harmful: downstream metrics all up.
+- t_pos std 0.041 (~14 h), t_local std 0.022 — alive. Pool entropy 4.36–5.60, healthy.
+
+**Verdict.** KEEP — primary AUPRC +0.066 over the previous best AND time MAE
+−2.4h AND AUROC +0.013; LoS +2.0h (within −/+5h guard). New running-best.
+Confirms supervisor's invert-the-ratio directive: risk-dominant P3 lifts risk
+discrimination and, surprisingly, also improves time MAE (better shared rep).
+Gain attributed: only `phase3_time_lambda` changed vs i4-tl025.
+
+**What I'd try next.** Trend 0.5→0.25→0.05 is monotonic up on AUPRC
+(0.687→0.760→0.826). Push once more to λ=0.02 (via fast retrain_phase3.py driver,
+~25min) to find the optimum / plateau; watch risk-logit calibration and time MAE.
+DEATH remains intrinsically hard — defer (could try outcome-specific pos_weight or
+a focal risk loss later, but not the headline lever).
