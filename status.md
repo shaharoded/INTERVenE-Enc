@@ -35,4 +35,12 @@ program.md.
 Tooling note: diagnostics run via `diagnose_run.py` (mirrors api.load_data's
 val pipeline; `api.py` trains at import-time so it cannot be imported for this).
 
+**Infra note (2026-06-02):** `git push` has no credentials in this environment
+(anonymous read works; push prompts for a username). Per supervisor decision,
+I commit every iteration locally — history and `git revert` rollbacks are fully
+preserved — and the branch will be pushed in one go once a token is supplied.
+Also fixed `utils.py` tee log path to `/tmp/training_<uid>.log` (a stale
+root-owned `/tmp/training.log` from the prep run blocked writes with
+PermissionError).
+
 ---
