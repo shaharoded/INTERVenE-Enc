@@ -513,3 +513,13 @@ so all checkpoints cleared first. Long run (P1+P2+P3 on 57k patients).
 embed_dim ≤ 384 — do NOT test 512/768. Results are already strong, so large
 scaleups aren't worth the time. Size-sweep grid is therefore {128 (this
 baseline), 256, 384}; pick the smallest within ~0.005 weighted AUPRC of the best.
+
+**Supervisor directive (2026-06-02):** replace the Phase-3 multi-seed study
+(3× full-data runs) with a **patient-level bootstrap 95% CI** on the final model.
+Built `bootstrap_eval.py`: one inference pass on the held-out test set, then
+B=2000 resamples of test patients with replacement, recomputing the support-
+weighted AUROC/AUPRC (and per-outcome) each time → 2.5/97.5 percentile CIs. The
+bootstrap statistic mirrors `evaluation.weighted_mean_auc` exactly (n_pos
+weighting; min-positive gate per resample). Will run on the final size-sweep
+winner. This estimates test-set sampling variance directly, far cheaper than
+re-seeding the whole pipeline.
