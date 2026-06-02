@@ -126,6 +126,6 @@ TRAINING_SETTINGS = {
     # --- Phase-3 settings ---
     # Per-outcome time MAE is part of the headline; weight the smooth-L1 high
     # enough that it keeps pace with the risk BCE.
-    "phase3_time_lambda": 0.05,
+    "phase3_time_lambda": 0.02,
     "phase3_head_hidden": 256,
 }
