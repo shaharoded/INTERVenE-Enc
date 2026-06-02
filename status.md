@@ -126,3 +126,20 @@ sharpness + Phase-3 risk/time balance, not a broken pathway.
    toward risk — the most direct lever on the AUROC gap. Run after #1 unless #1
    closes the gap.
 3. DEATH head is worst (AUPRC 0.26); watch whether either lever lifts it.
+
+### i1-hier  (direction #1: MLM mask granularity — hierarchical @ 0.15)
+
+**Hypothesis.** Switching `phase2_mlm_mask_mode` positional→hierarchical
+(HEART-style; non-interval masks become per-raw-family `[MASK_RAW_<family>]`)
+narrows the MLM target space, so the head sees *which raw concept* was hidden
+and only chooses among that family's values. Expectation: MLM top-1/top-5 rise
+(baseline 0.094/0.318), yielding a sharper backbone representation that lifts
+`patient_auroc_weighted` (target +0.010 past 0.847) without regressing AUPRC
+0.687. Ratio held at 0.15 to isolate the mode (ratio 0.25 is a separate iter).
+Cite: HEART hierarchical-masking / family-aware MLM curriculum (program.md dir #1).
+
+**Change.** `transform_emr/config/model_config.py`: `phase2_mlm_mask_mode`
+`"positional"` → `"hierarchical"`. No tokenizer rebuild needed — the family
+`[MASK_RAW_*]` specials are always emitted at tokenizer build (dataset.py), so
+the cached tokenizer + Phase-1 embedder (config unchanged) are reused; only
+Phase-2/Phase-3 retrain.
