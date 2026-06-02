@@ -523,3 +523,49 @@ bootstrap statistic mirrors `evaluation.weighted_mean_auc` exactly (n_pos
 weighting; min-positive gate per resample). Will run on the final size-sweep
 winner. This estimates test-set sampling variance directly, far cheaper than
 re-seeding the whole pipeline.
+
+### p2-fulldata RESULT — full-data baseline (embed_dim 128) = DELIVERABLE
+
+**Headline (held-out test, 8,562 patients / 7,446 with LoS).**
+```
+patient_auprc_weighted:  0.826051   95% CI [0.8205, 0.8319]  (boot sd 0.0029)
+patient_auroc_weighted:  0.878531   95% CI [0.8737, 0.8834]  (boot sd 0.0025)
+patient_auprc_simple:    0.756286
+patient_auroc_simple:    0.865256
+patient_max_f1_weighted: 0.789002
+length_of_stay_mae_hours:117.5462   (median 103.1, p90 228.1)
+time_mae weighted (6 risk outcomes by n_pos): 42.89 h
+train wall-clock: 28,402 s (~7.9 h); P2 full 101 ep, P3 early-stop ep37
+num_params: 1,852,682   peak_vram: 1204 MB
+```
+Per-outcome AUROC / AUPRC [95% CI] (bootstrap B=2000):
+| outcome | AUROC [CI] | AUPRC [CI] | n_pos |
+|---|---|---|---|
+| CARDIO-VASCULAR | 0.972 [0.962,0.981] | 0.931 [0.912,0.949] | 534 |
+| HYPEROSMOLALITY | 0.907 [0.900,0.914] | 0.918 [0.912,0.925] | 3448 |
+| DISGLYCEMIA_Hyperglycemia | 0.912 [0.904,0.919] | 0.914 [0.907,0.922] | 3157 |
+| KIDNEY_COMPLICATION | 0.877 [0.867,0.886] | 0.871 [0.861,0.880] | 2716 |
+| DISGLYCEMIA_Hypoglycemia | 0.841 [0.823,0.858] | 0.649 [0.619,0.679] | 771 |
+| DEATH | 0.685 [0.669,0.702] | 0.256 [0.234,0.279] | 1116 |
+
+**Variance (supervisor-directed bootstrap, replaces 3-seed study).** B=2000 patient
+resamples. CIs are tight (±~0.006); the weighted-AUPRC interval [0.821, 0.832]
+sits entirely far above the STRATS/GRU-D PRAUC≈0.65 benchmark, and weighted AUROC
+[0.874, 0.883] is just below the AUROC≈0.90 band on a 5.7× larger/harder test set
+than the 10k probe. DEATH remains the only weak head (AUPRC CI robustly ~0.25 —
+intrinsically hard, terminal+rare).
+
+**Interpretation.** vs the 10k probe (0.841/0.897 on 1,500 test patients), the
+full-data numbers (0.826/0.879 on 8,562) are slightly lower but far more reliable
+(tight CI). Net vs the original full-data-equivalent baseline recipe, the
+phase3_time_lambda rebalance is the single decisive lever. This is the publishable
+baseline.
+
+**Verdict.** DELIVERABLE BASELINE — beats PRAUC benchmark decisively (CI clears
+0.65 by ~0.17), approaches the AUROC benchmark. Backed up
+checkpoints.bak_keep_p2_full128 (model only; 3.2 GB processed cache left in place
+for size-sweep reuse).
+
+**What I'd try next.** Size sweep (embed_dim 256, then 384 — capped per supervisor),
+reusing the processed_datasets cache (data load is instant; only P1/P2/P3 retrain).
+Pick smallest within ~0.005 weighted AUPRC of best, then bootstrap-CI the winner.

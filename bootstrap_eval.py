@@ -162,7 +162,7 @@ def ci(arr):
     return np.percentile(a, 2.5), np.percentile(a, 97.5), a.mean(), a.std()
 
 
-print("\n=== BOOTSTRAP 95% CI (patient resample, B=%d) ===" % B)
+print(f"\n=== BOOTSTRAP 95pct CI (patient resample, B={B}) ===")
 for label, point, arr in [
     ("patient_auprc_weighted", res["patient_auprc_weighted"], boot_auprc),
     ("patient_auroc_weighted", res["patient_auroc_weighted"], boot_auroc),
