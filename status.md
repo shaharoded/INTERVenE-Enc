@@ -402,3 +402,31 @@ calibration from the widening risk logits (std already 13.5). If no-KEEP, lock
 convergence). If it surprises with > +0.010, reconsider.
 
 **Change.** `phase3_time_lambda` 0.02 → 0.01 (code committed separately).
+
+**Smoke result.** sample=50: P3 total = Risk + 0.01·Time = 1.86, Gate-A/D PASS.
+Phase-1 reused, Phase-2 = baseline.
+
+**Headline metrics (10k) vs i4c-tl002 (best).**
+```
+                            i4d-tl001   i4c-tl002   Δ
+patient_auprc_weighted:     0.827640    0.841081    -0.0135  (regresses)
+patient_auroc_weighted:     0.873742    0.896866    -0.0232  (regresses)
+length_of_stay_mae_hours:   118.1599    119.8719    -1.71 h
+time_mae weighted (6 risk): 40.35 h     40.64 h     -0.29 h
+```
+Per-outcome AUPRC mostly flat/down vs i4c (CVD 0.939, Hyperosmol 0.920, Hyperglyc
+0.914, Kidney 0.859, Hypoglycemia 0.674, DEATH 0.272). Both headline metrics down
+together → real turnover, not noise.
+
+**Verdict.** DISCARD — both AUPRC (−0.0135) and AUROC (−0.0232) regress vs the
+λ=0.02 best. The time-λ curve {0.5,0.25,0.05,0.02,0.01} =
+{0.687,0.760,0.826,0.841,0.828} peaks at **λ=0.02**. Locking
+`phase3_time_lambda = 0.02` as the time-λ winner. Mechanism: below ~0.02 the risk
+logits overconfident-saturate (diagnose showed std climbing 5.9→10.7→13.5) and
+the shared rep loses the small time-regularisation that helped generalisation.
+
+**What I'd try next.** Time-λ lever converged (this is its no-KEEP). Next:
+direction #5 `phase3_backbone_lr_factor` 0.01→0.1 (playbook flags default may be
+too low; lets the backbone specialise more for the task in P3) with λ=0.02 locked.
+If no-KEEP → 2nd consecutive no-KEEP → Phase-1 converged → proceed to Phase-2
+full-data baseline with the locked recipe.
