@@ -357,3 +357,37 @@ blowup; watch risk-logit calibration (already std ~10 at λ=0.05). If it plateau
 or regresses, λ=0.05 is locked as the time-λ winner.
 
 **Change.** `phase3_time_lambda` 0.05 → 0.02 (code committed separately).
+
+**Smoke result.** sample=50: P3 total = Risk + 0.02·Time = 2.70, no NaN/inf,
+Gate-A/D PASS. Phase-1 reused, Phase-2 = baseline (early-stopped ep88 this run —
+run-to-run variance; phase2 config identical).
+
+**Headline metrics (10k) vs i4b-tl005 (prev best).**
+```
+                            i4c-tl002   i4b-tl005   Δ
+patient_auprc_weighted:     0.841081    0.826193    +0.0149  (PRIMARY, > +0.010)
+patient_auroc_weighted:     0.896866    0.881450    +0.0154  (≈ 0.90 target)
+patient_auprc_simple:       0.771648    0.759314    +0.0123
+patient_max_f1_weighted:    0.801152    0.782523    +0.0186
+length_of_stay_mae_hours:   119.8719    122.3213    -2.45 h
+time_mae weighted (6 risk): 40.64 h     39.01 h     +1.63 h  (within +5h guard)
+```
+Per-outcome AUROC / AUPRC: CVD 0.986/0.937, Hyperglyc 0.931/0.929, Hyperosmol
+0.919/0.930, Kidney 0.900/0.887, Hypoglycemia 0.851/0.682, DEATH 0.716/0.264
+(DEATH up from 0.667/0.213 — improving but still the laggard). All non-DEATH
+AUPRC now ≥ 0.68.
+
+**Diagnose.py (positional p=0.15).** Risk logits even WIDER (std 9.3–13.5, up
+from 5.9–10.7 at λ0.05) — overconfidence rising as λ drops; calibration still OK
+(f1@0.5 0.791 ≈ max-f1 0.801). MLM top1 0.085. t_pos std 0.038, t_local 0.022 —
+alive. Pool entropy 5.08–5.61, healthy.
+
+**Verdict.** KEEP — primary AUPRC +0.0149 (> +0.010), AUROC +0.0154 (now 0.897 ≈
+benchmark), LoS −2.4h; time MAE +1.6h within guard. New running-best. Gain
+attributed: only `phase3_time_lambda` 0.05→0.02. λ trend
+{0.5,0.25,0.05,0.02}={0.687,0.760,0.826,0.841} — decelerating (+0.015 now).
+
+**What I'd try next.** Probe λ=0.01 to confirm the plateau before locking the
+recipe for the long full-data Phase-2. Expect < +0.010 (plateau) and possibly
+calibration degradation from the widening logits; if so, lock λ=0.02 as the
+time-λ winner and move to direction #5 (backbone_lr_factor) or Phase-2.

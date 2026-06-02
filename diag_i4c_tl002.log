@@ -1,0 +1,30 @@
+[diag] sample=10000 mask_mode=positional p=0.15 device=cuda
+[DataProcessor] Applied temporal filter: WHERE Value NOT LIKE '%Steady%' | rows 432750 -> 352554
+[DataProcessor] Applied temporal filter: WHERE ConceptName NOT LIKE '%_PATTERN%' | rows 352554 -> 334973
+[diag] loading model from /workspace/autoresearch/code/checkpoints/phase3/ckpt_best.pt
+[EMREncoder] Outcomes not in tokenizer vocab (ignored): ['ACIDOSIS_EVENT', 'KETOACIDOSIS_EVENT']
+[EMREncoder]: Total params: 1.68 M
+
+=== run_diagnostics  n_batches=4  p=0.15  mode=positional ===
+[probe_mlm_accuracy] n=8724  top1=0.0846  top5=0.2996  majority_top1=0.0277
+[probe_time_aux_residuals] t_pos: n=25318  mean=-0.0140  std=0.0375  p5=-0.0912, p25=-0.0340, p50=-0.0027, p75=0.0130, p95=0.0291
+[probe_time_aux_residuals] t_local: n=6668  mean=-0.0000  std=0.0225  p5=-0.0173, p25=0.0013, p50=0.0025, p75=0.0039, p95=0.0081
+[probe_legality_starvation] n=5755  top1=0.0836  top5=0.2945  top20=0.6617
+[probe_outcome_logit_distribution] per outcome risk logit stats:
+  CARDIO-VASCULAR_DISORDER_EVENT           mean=-5.007  std=9.343  p5=-13.6674, p25=-10.5503, p50=-7.5080, p75=-4.3262, p95=20.4538
+  DEATH_EVENT                              mean=-3.022  std=12.056  p5=-13.4199, p25=-11.5606, p50=-10.0603, p75=10.7178, p95=18.6939
+  DISGLYCEMIA_EVENT_Hyperglycemia          mean=+3.475  std=13.520  p5=-16.7460, p25=-9.6854, p50=8.2833, p75=16.2736, p95=19.3848
+  DISGLYCEMIA_EVENT_Hypoglycemia           mean=-3.594  std=11.518  p5=-15.1693, p25=-10.8525, p50=-7.9009, p75=-3.3514, p95=22.2833
+  HYPEROSMOLALITY_EVENT                    mean=+3.989  std=9.494  p5=-14.3486, p25=-1.9858, p50=3.6491, p75=12.2572, p95=16.9586
+  KIDNEY_COMPLICATION_EVENT                mean=+3.598  std=12.436  p5=-14.8429, p25=-7.1951, p50=10.0740, p75=15.2270, p95=18.7002
+[probe_pool_attention] mean attention entropy per outcome:
+  CARDIO-VASCULAR_DISORDER_EVENT           entropy = 5.542
+  DEATH_EVENT                              entropy = 5.082
+  DISGLYCEMIA_EVENT_Hyperglycemia          entropy = 5.139
+  DISGLYCEMIA_EVENT_Hypoglycemia           entropy = 5.611
+  HYPEROSMOLALITY_EVENT                    entropy = 5.083
+  KIDNEY_COMPLICATION_EVENT                entropy = 5.395
+  RELEASE_EVENT                            entropy = 5.307
+=== end run_diagnostics ===
+
+[diag] done.
