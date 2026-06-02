@@ -267,3 +267,16 @@ directive ("risk loss higher than time — invert the two"), next run i4b sets
 `phase3_time_lambda`=0.05 → weighted-time ~0.2 vs risk ~0.45 (~2:1 RISK-dominant).
 Hypothesis: further AUPRC/AUROC lift toward AUROC 0.90; watch time MAE for the −5h
 guardrail (robust so far). If 0.05 overshoots (time MAE blows up), 0.1 is the fallback.
+
+### i4b-tl005  (direction #4b: invert risk/time — phase3_time_lambda 0.25 → 0.05; supervisor-directed)
+
+**Hypothesis.** i4-tl025 lifted AUPRC +0.074 with time MAE flat, but convergence
+math shows λ=0.25 is still ~2:1 TIME-dominant (risk ~0.45 vs weighted-time ~1.0).
+Supervisor directive: make risk the dominant term. λ=0.05 → weighted-time ~0.2 vs
+risk ~0.45 (~2:1 RISK-dominant — inverted). Expect further AUPRC/AUROC lift
+(toward AUROC 0.90) as the shared representation specialises for risk
+discrimination. Risk: time MAE may finally degrade — KEEP needs it within +5h of
+the i4-tl025 running-best (41.4h). Phase-3-only; Phase-1 reused, Phase-2 = baseline.
+
+**Change.** `transform_emr/config/model_config.py`: `phase3_time_lambda`
+`0.25` → `0.05`. (Code committed separately from journal for clean revert.)
