@@ -391,3 +391,14 @@ attributed: only `phase3_time_lambda` 0.05→0.02. λ trend
 recipe for the long full-data Phase-2. Expect < +0.010 (plateau) and possibly
 calibration degradation from the widening logits; if so, lock λ=0.02 as the
 time-λ winner and move to direction #5 (backbone_lr_factor) or Phase-2.
+
+### i4d-tl001  (direction #4d: phase3_time_lambda 0.02 → 0.01 — plateau check)
+
+**Hypothesis.** Confirm the time-λ optimum before locking the recipe for full-data
+Phase-2. λ trend is decelerating (last gain +0.015). Expect λ=0.01 to give
+< +0.010 AUPRC over i4c (0.841) — i.e. a plateau / no-KEEP — and possibly worse
+calibration from the widening risk logits (std already 13.5). If no-KEEP, lock
+λ=0.02 as the time-λ winner (and this is the lever's first no-KEEP toward Phase-1
+convergence). If it surprises with > +0.010, reconsider.
+
+**Change.** `phase3_time_lambda` 0.02 → 0.01 (code committed separately).
