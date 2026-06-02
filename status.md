@@ -444,3 +444,54 @@ blowup. If no-KEEP → 2nd consecutive no-KEEP → Phase-1 converged.
 
 **Change.** `phase3_backbone_lr_factor` 0.01 → 0.1 (code committed separately).
 Time-λ stays at the locked 0.02.
+
+**Smoke result.** sample=50: Gate-A (no NaN/inf) + Gate-D PASS. Phase-1 reused,
+Phase-2 = baseline.
+
+**Headline metrics (10k) vs i4c-tl002 (best).**
+```
+                            i5-blr01    i4c-tl002   Δ
+patient_auprc_weighted:     0.823953    0.841081    -0.0171  (PRIMARY regresses)
+patient_auroc_weighted:     0.874836    0.896866    -0.0221  (regresses)
+length_of_stay_mae_hours:   111.1711    119.8719    -8.71 h  (big improve)
+time_mae weighted (6 risk): 35.29 h     40.64 h     -5.35 h  (big improve)
+```
+Per-outcome time-MAE all down (CVD 7.5h, Kidney 19.8h, Hypoglycemia 28.8h); risk
+AUPRC down across the board (DEATH 0.210, Kidney 0.865, Hyperglyc 0.912). A clean
+risk↔time trade-off: backbone_lr_factor=0.1 lets the backbone+embedder specialise
+for the time regression (and LoS) at the cost of the MLM-pretrained features that
+carry risk-ranking signal.
+
+**Verdict.** DISCARD — primary AUPRC regresses −0.0171 (≥0.010) and AUROC −0.0221,
+despite time MAE −5.3h / LoS −8.7h. Per KEEP rule (AUPRC-led; "no headline
+regresses by threshold" + "AUROC down & AUPRC down → DISCARD"), the time gain does
+not justify the risk loss when risk is the headline. Reverting; backbone_lr_factor
+stays 0.01. **IMPORTANT finding for the human:** backbone_lr_factor is the
+risk↔time dial — 0.1 buys ~5–9h better time MAE/LoS for ~0.017 AUPRC. If the
+deliverable later weights time more heavily, revisit ~0.03 as a compromise.
+
+**This is the 2nd consecutive no-KEEP (i4d, i5) across the open Phase-1 levers →
+Phase-1 declared CONVERGED.**
+
+---
+
+## PHASE-1 CONVERGED — locked architecture
+
+The only architectural change that survived KEEP vs the baseline is the Phase-3
+loss rebalance. Locked recipe (10k → carried to full-data Phase-2):
+- embed_dim 128 / n_layer 4 / n_head 2 (size is a Phase-2 sweep axis)
+- MLM positional @ ratio 0.15; phase2 aux caps t_pos 0.40 / t_local 0.30 (untouched)
+- **phase3_time_lambda = 0.02** ← the winning change (was 0.5)
+- phase3_backbone_lr_factor = 0.01 (default; 0.1 trades risk for time — rejected)
+- phase3_head_hidden = 256, pool n_heads = 4 (defaults; diagnostics healthy, not searched)
+
+10k headline progression (held-out test):
+| stage | AUPRC_w | AUROC_w | LoS h | time_w h |
+|---|---|---|---|---|
+| baseline (λ0.5) | 0.687 | 0.847 | 121.5 | 41.7 |
+| **best i4c (λ0.02)** | **0.841** | **0.897** | 119.9 | 40.6 |
+Net: **AUPRC +0.154, AUROC +0.050** vs baseline; both at/above the STRATS/GRU-D
+targets (AUPRC ≫ 0.65; AUROC ≈ 0.90). Time prediction reasonable and stable.
+Directions #1 (mask granularity) discarded; #2/#3 not indicated by diagnostics
+(no MLM-collapse; P2 time auxes clamp-limited so cap edits are no-ops); #5
+discarded; #6/#7 not indicated (head/pool diagnostics healthy).
