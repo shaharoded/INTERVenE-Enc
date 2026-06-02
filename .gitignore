@@ -16,3 +16,7 @@ smoke.log
 
 data/
 checkpoints/
+# Local checkpoint backups (KEEP recovery artifacts) — never commit
+checkpoints.bak_keep_*/
+# data is an environment symlink to /workspace/autoresearch/data
+/data
