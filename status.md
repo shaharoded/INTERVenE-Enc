@@ -508,3 +508,8 @@ publishable baseline before the size sweep.
 **Change.** `sample` 10000 → None (full data). Architecture identical to locked
 recipe. Tokenizer/Phase-1/scaler rebuilt from scratch (full-data vocab differs),
 so all checkpoints cleared first. Long run (P1+P2+P3 on 57k patients).
+
+**Supervisor constraint (2026-06-02, mid-Phase-2):** cap the size sweep at
+embed_dim ≤ 384 — do NOT test 512/768. Results are already strong, so large
+scaleups aren't worth the time. Size-sweep grid is therefore {128 (this
+baseline), 256, 384}; pick the smallest within ~0.005 weighted AUPRC of the best.
