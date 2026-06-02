@@ -143,3 +143,57 @@ Cite: HEART hierarchical-masking / family-aware MLM curriculum (program.md dir #
 `[MASK_RAW_*]` specials are always emitted at tokenizer build (dataset.py), so
 the cached tokenizer + Phase-1 embedder (config unchanged) are reused; only
 Phase-2/Phase-3 retrain.
+
+**Smoke result.** sample=50, 1 epoch/phase: hierarchical mode active, no NaN/inf,
+summary + all headline keys print → Gate-A/D PASS (B/C not exercisable at 1 epoch,
+as in baseline). Phase-1 embedder reused from cache (config unchanged); only
+Phase-2/Phase-3 retrained.
+
+**Headline metrics (10k) vs baseline.**
+```
+                            i1-hier      baseline     Δ
+patient_auprc_weighted:     0.676561     0.686507    -0.0099   (PRIMARY regresses)
+patient_auroc_weighted:     0.844911     0.846871    -0.0020   (no lift)
+length_of_stay_mae_hours:   117.8226     121.4905    -3.67 h   (<5h thresh)
+time_mae weighted (6 risk): 38.95 h      41.71 h     -2.76 h   (<5h thresh)
+patient_max_f1_weighted:    0.700318     0.706229    -0.0059
+```
+Per-outcome AUPRC Δ: Hyperglycemia +0.006, CVD +0.049, Hyperosmolality +0.030,
+DEATH +0.000, Kidney **−0.032**, Hypoglycemia **−0.216** (0.447→0.231, collapse).
+The Hypoglycemia collapse (rare, 9.7%) drives the weighted AUPRC drop; time-MAE
+improved broadly (CVD 12.5→10.4, Hyperosmol 22.5→17.2, Kidney 32.2→26.9) but
+below the −5h KEEP threshold. P2 early-stopped at ep88 (baseline ran full 101).
+
+**Per-aux training trace.**
+| phase | aux | unlock ep | λ_max | anchor raw | final | note |
+|---|---|---|---|---|---|---|
+| P2 | MLM (main) | — | — | 5.8501 | (early-stop ep88) | same anchor as baseline |
+| P2 | t_pos | 4 | 10.0 (clamp) | ~0.067 | tiny | as baseline |
+| P2 | t_local | 4 | 10.0 (clamp) | 0.0010 | tiny | as baseline |
+| P3 | Risk/Time | — | λ=0.5 | — | best_val 3.93 (vs 4.24) | P3 val better, AUPRC worse |
+
+**Diagnose.py (hierarchical p=0.15) vs baseline.**
+- MLM top1=0.0935 (baseline 0.0940 — UNCHANGED), top5=0.2989 (was 0.318 — WORSE),
+  legality top20=0.6664 (was 0.701 — WORSE). The family-hint mechanism did NOT
+  sharpen MLM; it slightly degraded top-5/top-20.
+- t_pos std 0.0308, t_local std 0.0234 — alive, ~as baseline.
+- Risk logits well-spread; pool entropy 4.23–5.46 — healthy, ~as baseline.
+
+**Verdict.** DISCARD — primary AUPRC regresses −0.0099 (≥0.005) with no headline
+meeting the +0.010 / −5h KEEP threshold, and the stated mechanism is falsified:
+diagnose.py shows hierarchical masking does NOT raise MLM top-1/top-5. The
+full-vocab CE target is unchanged by the mode, and the model already infers the
+raw family from context — so the input hint adds no disambiguation and removes
+mask-token diversity, slightly hurting top-5 and crashing the rare Hypoglycemia head.
+
+**What I'd try next.** Family-hint masking is a dead end here (confirmed by the
+MLM-accuracy probe). NOT testing ratio 0.25 under hierarchical — the mode itself
+is the problem, not the ratio. Two live options:
+- (a) Direction #1 residual: positional MLM @ **ratio 0.25** (more masked
+  positions per batch → more MLM signal per epoch; cheap, isolates ratio under
+  the working positional mode).
+- (b) **Direction #4 (Phase-3 time λ)** — the strongest data-driven lever: P3
+  Time term still dominates Risk ~8.6:1; lowering `phase3_time_lambda` should
+  push gradient toward risk and lift AUROC/AUPRC. Leaning (b) given the AUROC gap
+  is the real goal and #1's mode arm just failed; will try ratio 0.25 only if (b)
+  also stalls.
