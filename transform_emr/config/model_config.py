@@ -119,7 +119,7 @@ TRAINING_SETTINGS = {
     #   "hierarchical" — per-family [MASK_RAW_<family>] for non-interval tokens
     #                    so the encoder still sees which raw concept was masked.
     #                    Tokenizer auto-emits the family specials at build time.
-    "phase2_mlm_mask_mode": "hierarchical",
+    "phase2_mlm_mask_mode": "positional",
     # Phase-2 aux-loss fraction caps live inside `phase2_scheduler`
     # ("aux_fraction_caps": {"t_pos": …, "t_local": …}) — see above.
 
