@@ -610,3 +610,16 @@ config to embed_dim 128.
 **What I'd try next.** Final remaining Phase-2 axis: the QA-data ablation
 (USE_QA_DATA toggle) on the locked 128 recipe — a data question orthogonal to size.
 Then the locked 128 model + its bootstrap CIs is the final deliverable.
+
+### p2-qa  (PHASE 2 step 3: QA-data ablation, USE_QA_DATA=True, locked 128 recipe)
+
+**Hypothesis.** Toggle USE_QA_DATA on: adds %_PATTERN% treatment-quality events
+to the LM stream + QA ComplianceScore context features. May improve risk/time by
+giving the encoder treatment-adherence signal, or may add noise. Locked recipe
+(embed_dim 128, phase3_time_lambda 0.02). KEEP over the non-QA 128 deliverable
+(AUPRC 0.826, CI [0.821,0.832]) only if weighted AUPRC gains beyond the CI
+(~+0.01). Non-QA full-data vocab = 503 tokens; expect QA vocab > this.
+
+**Change.** dataset_config USE_QA_DATA False→True. Pre-flight: cleared tokenizer,
+scaler, processed_datasets cache, and all phases (vocab + ctx_dim change → full
+rebuild incl. Phase-1). Smoke then full-data.
