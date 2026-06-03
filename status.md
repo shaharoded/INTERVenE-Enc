@@ -584,3 +584,29 @@ Capped at 384 per supervisor.
 cache (key ignores embed_dim → instant data load); Phase-1 retrains for the new
 dim; Phase-2/3 retrain. Smoke clobbers tokenizer/scaler → restored from the
 p2_full128 backup before the full run.
+
+### p2-size256 RESULT — embed_dim 256 (full data)
+
+**Headline (held-out test, 8,562 patients).**
+```
+                          size256     full128(best)  Δ          128 95%CI
+patient_auprc_weighted:   0.827870    0.826051       +0.0018    [0.8205,0.8319]  (INSIDE CI)
+patient_auroc_weighted:   0.880049    0.878531       +0.0015    [0.8737,0.8834]  (INSIDE CI)
+length_of_stay_mae_hours: 125.6608    117.5462       +8.11 h    (worse)
+time_mae weighted:        44.86 h     42.89 h        +1.97 h    (worse)
+num_params:               6,814,346   1,852,682      3.7x bigger
+```
+Per-outcome essentially unchanged (CVD 0.933, Hyperosmol 0.912, Hyperglyc 0.920,
+Kidney 0.881, Hypoglycemia 0.631, DEATH 0.264). The +0.0018 AUPRC sits well inside
+the 128 bootstrap CI → statistically indistinguishable.
+
+**Verdict.** DISCARD for the headline — 256 gives no risk gain outside the CI and
+slightly worse LoS/time for 3.7× the parameters. Per the size-sweep rule (smallest
+within ~0.005 AUPRC of best) **embed_dim 128 is the final model**. Capacity has
+plateaued by 256, and per supervisor's avoid-scaleup steer I am **skipping 384**
+(it cannot change the pick without a >0.005 jump that 256 did not show). Reverting
+config to embed_dim 128.
+
+**What I'd try next.** Final remaining Phase-2 axis: the QA-data ablation
+(USE_QA_DATA toggle) on the locked 128 recipe — a data question orthogonal to size.
+Then the locked 128 model + its bootstrap CIs is the final deliverable.
