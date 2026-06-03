@@ -25,7 +25,7 @@ MODEL_CONFIG = {
 
 TRAINING_SETTINGS = {
     "phase1_n_epochs": 100,
-    "phase2_n_epochs": 100,
+    "phase2_n_epochs": 200,
     "phase3_n_epochs": 100,
     "sample": None,  # Smoke: 50 + epochs 1.  Phase-1 probe: 10000.  Phase-2 confirm: None (full data).
 

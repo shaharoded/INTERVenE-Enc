@@ -406,9 +406,11 @@ class EMREncoder(nn.Module):
         K = self.num_outcomes
         all_idx = torch.arange(K, dtype=torch.long)
         if self._release_idx >= 0:
-            risk_idx = torch.tensor(
-                [i for i in range(K) if i != self._release_idx], dtype=torch.long,
-            )
+            _risk = [i for i in range(K) if i != self._release_idx]
+            # Guard: a RELEASE-only outcome set (e.g. the LoS-focused single-target
+            # model) would leave the risk head with zero targets and a NaN BCE.
+            # Keep RELEASE in the risk head when it is the sole outcome.
+            risk_idx = (torch.tensor(_risk, dtype=torch.long) if _risk else all_idx.clone())
         else:
             risk_idx = all_idx.clone()
         time_idx = all_idx

@@ -633,3 +633,34 @@ model (M-128, λ=0.02, non-QA):
 - **expB-nodeath** (only if A lifts DEATH): OUTCOMES=clinical, TERMINAL=[RELEASE]
   → drop DEATH head; tests whether the other outcomes lift without DEATH.
 Bootstrap CIs on both. Reference DEATH (multi-task M-128): AUPRC 0.255 [0.234,0.279].
+
+---
+
+## SECTION: Increased-epochs single-target models (supervisor-directed, 2026-06-03)
+
+Context: full-data M-128 Phase-2 ran to the 100-epoch CAP (phase2_epochs=101, no
+early-stop) so it was likely still improving; Phase-3 converged (early-stop ep37).
+Per supervisor: raise phase2_n_epochs 100→200 (P3 stays 100, early-stop still on)
+and retrain M-128 as two SEPARATE single-target models on the regular (non-QA) data:
+- **s1-death** — pure DEATH binary classifier. OUTCOMES=[], TERMINAL=[DEATH].
+  Positive = DEATH occurs in trajectory, negative = no DEATH. Risk head = DEATH;
+  time head = time-to-death. Isolates DEATH from multi-task interference.
+- **s1-los** — length-of-stay model. OUTCOMES=[], TERMINAL=[RELEASE] + a guard in
+  transformer.attach_task_heads so RELEASE (the sole outcome) stays in the risk head
+  (else NaN BCE). LoS = trajectory span (max−min StartDateTime; terminal RELEASE/DEATH
+  ~1s). Deliverable = length_of_stay_mae + a supplementary all-patients LoS metric
+  (terminal time for everyone) added in the bootstrap script.
+Old results untouched. Each reports full test-set metrics + bootstrap 95% CI. Then
+QA ablation on whichever framing (full multi-task model vs these) works better.
+Reference DEATH (multi-task M-128 full-data): AUPRC 0.255 [0.234,0.279], AUROC 0.684.
+
+### s1-death  (DEATH-only, P2=200)
+
+**Hypothesis.** Multi-task interference suppresses DEATH (AUPRC 0.255 in the
+6-outcome model). A dedicated DEATH binary model with full Phase-2 training (cap
+200) may lift DEATH AUPRC/AUROC beyond the multi-task CI. KEEP if DEATH AUPRC
+clears 0.279 (top of multi-task CI).
+
+**Change.** dataset_config TERMINAL_OUTCOMES=[DEATH] (drop RELEASE); OUTCOMES=[];
+model_config phase2_n_epochs 100→200. transformer.py risk-head guard (for the later
+RELEASE-only model; no effect here). USE_QA_DATA=False.
