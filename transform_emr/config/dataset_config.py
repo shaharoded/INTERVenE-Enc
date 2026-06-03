@@ -19,7 +19,7 @@ QA_DATA_FILE             = os.path.join(PROJECT_ROOT, 'data', 'source', 'qa_data
 # tokens REMAIN in the LM vocabulary (the tokenizer is built from training data,
 # not from this list), so their occurrences still shape backbone context; they
 # simply stop being head-BCE targets, CBM-forbid-protected, and sampler-upweighted.
-OUTCOMES = [
+_CLINICAL_OUTCOMES = [
     "DISGLYCEMIA_EVENT_Hyperglycemia",
     "DISGLYCEMIA_EVENT_Hypoglycemia",
     "HYPEROSMOLALITY_EVENT",
@@ -28,6 +28,12 @@ OUTCOMES = [
     "KETOACIDOSIS_EVENT",
     "ACIDOSIS_EVENT",
 ]
+# DEATH-isolation experiments (supervisor-directed). Which outcomes get task heads:
+#   regular         : OUTCOMES = _CLINICAL_OUTCOMES ; TERMINAL_OUTCOMES = [RELEASE, DEATH]
+#   Exp A DEATH-only: OUTCOMES = []                 ; TERMINAL_OUTCOMES = [RELEASE, DEATH]
+#   Exp B no-DEATH  : OUTCOMES = _CLINICAL_OUTCOMES ; TERMINAL_OUTCOMES = [RELEASE]
+# Clinical tokens always remain in the LM vocab (built from data) regardless.
+OUTCOMES = []   # Exp A: DEATH-only + LoS single-target model
 # Note: prediction targets are different from thesis dataset (Kinneret) due to different available prediction targets
 # KETOACIDOSIS_EVENT and ACIDOSIS_EVENT are available in the data, but low support will auto-reduct them (OUTCOME_RARE_THRESHOLD_PCT)
 
@@ -43,7 +49,7 @@ MEAL_TOKENS = ["MEAL_CONTEXT_Breakfast", "MEAL_CONTEXT_Lunch", "MEAL_CONTEXT_Din
 # Outcomes below this threshold are dropped — they have too few positive examples to learn from.
 OUTCOME_RARE_THRESHOLD_PCT = 1.0
 
-USE_QA_DATA = True   # Phase-2 QA ablation (was False)
+USE_QA_DATA = False  # back to regular model for DEATH-isolation experiments
 # History window (hours from admission) used when aggregating QA ComplianceScore into
 # context features. At eval time DataProcessor overrides this with max_input_days * 24
 # so QA features match the k-day seed actually given to the model.

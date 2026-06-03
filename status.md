@@ -623,3 +623,13 @@ giving the encoder treatment-adherence signal, or may add noise. Locked recipe
 **Change.** dataset_config USE_QA_DATA False→True. Pre-flight: cleared tokenizer,
 scaler, processed_datasets cache, and all phases (vocab + ctx_dim change → full
 rebuild incl. Phase-1). Smoke then full-data.
+
+**Supervisor directive (2026-06-03): DEATH-isolation experiments (preempts QA).**
+The QA full-data run was killed at Phase-1 ep15 (~44min, negligible loss) to
+prioritise these; QA will be re-run last. Two experiments on the regular locked
+model (M-128, λ=0.02, non-QA):
+- **expA-deathonly**: OUTCOMES=[] → risk head targets DEATH only; time head =
+  DEATH + RELEASE(LoS). Tests whether multi-task interference suppresses DEATH.
+- **expB-nodeath** (only if A lifts DEATH): OUTCOMES=clinical, TERMINAL=[RELEASE]
+  → drop DEATH head; tests whether the other outcomes lift without DEATH.
+Bootstrap CIs on both. Reference DEATH (multi-task M-128): AUPRC 0.255 [0.234,0.279].
