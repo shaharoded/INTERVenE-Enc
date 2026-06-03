@@ -708,3 +708,14 @@ hard. Backed up checkpoints.bak_keep_m_term.
 
 **What I'd try next.** m-clin (non-terminal clinical outcomes, P2=200): does
 removing the terminal events lift the clinical heads vs the multi-task baseline?
+
+### m-clin  (non-terminal clinical outcomes, P2=200)
+
+**Hypothesis.** Mirror of m-term: train only the non-terminal clinical outcomes
+(+ their time), dropping DEATH/RELEASE. Tests whether removing the terminal events
+lifts the clinical heads' weighted AUPRC vs the multi-task baseline (clinical
+subset: Hyperglyc 0.914, Hypoglyc 0.649, Hyperosmol 0.918, CVD 0.931, Kidney 0.871
+→ n_pos-weighted ≈ 0.86). KEEP if clinical-weighted AUPRC clears that beyond CI.
+
+**Change.** dataset_config OUTCOMES=_CLINICAL_OUTCOMES, TERMINAL_OUTCOMES=[];
+phase2_n_epochs 200. Risk+time on the 5 above-threshold clinical outcomes.

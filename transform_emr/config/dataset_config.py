@@ -33,7 +33,7 @@ _CLINICAL_OUTCOMES = [
 #   Exp A DEATH-only: OUTCOMES = []                 ; TERMINAL_OUTCOMES = [RELEASE, DEATH]
 #   Exp B no-DEATH  : OUTCOMES = _CLINICAL_OUTCOMES ; TERMINAL_OUTCOMES = [RELEASE]
 # Clinical tokens always remain in the LM vocab (built from data) regardless.
-OUTCOMES = []   # Exp A: DEATH-only + LoS single-target model
+OUTCOMES = _CLINICAL_OUTCOMES   # m-clin: non-terminal clinical outcomes
 # Note: prediction targets are different from thesis dataset (Kinneret) due to different available prediction targets
 # KETOACIDOSIS_EVENT and ACIDOSIS_EVENT are available in the data, but low support will auto-reduct them (OUTCOME_RARE_THRESHOLD_PCT)
 
@@ -41,7 +41,7 @@ ADMISSION_TOKEN = "ADMISSION_EVENT"
 DEATH_TOKEN = "DEATH_EVENT"
 RELEASE_TOKEN = "RELEASE_EVENT"
 
-TERMINAL_OUTCOMES = [RELEASE_TOKEN, DEATH_TOKEN]   # m-term: DEATH + LoS (terminal outcomes)
+TERMINAL_OUTCOMES = []   # m-clin: no terminal outcomes
 
 MEAL_TOKENS = ["MEAL_CONTEXT_Breakfast", "MEAL_CONTEXT_Lunch", "MEAL_CONTEXT_Dinner", "MEAL_CONTEXT_Night-Snack"] # Keep ordered! concept_value tokens
 
