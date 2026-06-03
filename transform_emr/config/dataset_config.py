@@ -41,7 +41,7 @@ ADMISSION_TOKEN = "ADMISSION_EVENT"
 DEATH_TOKEN = "DEATH_EVENT"
 RELEASE_TOKEN = "RELEASE_EVENT"
 
-TERMINAL_OUTCOMES = []   # m-clin: no terminal outcomes
+TERMINAL_OUTCOMES = [RELEASE_TOKEN, DEATH_TOKEN]   # full outcomes (QA ablation)
 
 MEAL_TOKENS = ["MEAL_CONTEXT_Breakfast", "MEAL_CONTEXT_Lunch", "MEAL_CONTEXT_Dinner", "MEAL_CONTEXT_Night-Snack"] # Keep ordered! concept_value tokens
 
@@ -49,7 +49,7 @@ MEAL_TOKENS = ["MEAL_CONTEXT_Breakfast", "MEAL_CONTEXT_Lunch", "MEAL_CONTEXT_Din
 # Outcomes below this threshold are dropped — they have too few positive examples to learn from.
 OUTCOME_RARE_THRESHOLD_PCT = 1.0
 
-USE_QA_DATA = False  # back to regular model for DEATH-isolation experiments
+USE_QA_DATA = True   # QA ablation on best (full-outcome) model
 # History window (hours from admission) used when aggregating QA ComplianceScore into
 # context features. At eval time DataProcessor overrides this with max_input_days * 24
 # so QA features match the k-day seed actually given to the model.

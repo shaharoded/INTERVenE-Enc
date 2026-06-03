@@ -719,3 +719,21 @@ subset: Hyperglyc 0.914, Hypoglyc 0.649, Hyperosmol 0.918, CVD 0.931, Kidney 0.8
 
 **Change.** dataset_config OUTCOMES=_CLINICAL_OUTCOMES, TERMINAL_OUTCOMES=[];
 phase2_n_epochs 200. Risk+time on the 5 above-threshold clinical outcomes.
+
+### m-clin — ABORTED (supervisor)
+Supervisor stopped m-clin mid-Phase-2: since isolating DEATH did not lift its
+ranking (m-term DEATH CI overlaps multi-task), the mirror clinical-only run won't
+change the conclusion. Killed at P2 ep~26. No result. Proceeding to the QA ablation
+on the best (full-outcome) model only, then wrap up.
+
+### p2-qa  (QA-data ablation on the BEST model — full outcomes, clean: only USE_QA_DATA differs)
+
+**Hypothesis.** Does adding QA treatment-quality data (USE_QA_DATA=True: %_PATTERN%
+events + QA ComplianceScore context, ctx_dim 7→16, vocab 503→523) lift the
+deliverable model? Clean ablation: identical recipe to the full-data deliverable
+(M-128, λ=0.02, full outcomes, P2=100, P3=100) with ONLY USE_QA_DATA toggled.
+KEEP if weighted AUPRC clears the non-QA deliverable CI (0.826 [0.821,0.832]).
+
+**Change.** dataset_config USE_QA_DATA True; OUTCOMES=clinical, TERMINAL=[RELEASE,DEATH]
+restored; model_config phase2_n_epochs reverted 200→100 (match the deliverable so
+QA is the only variable). Full rebuild (vocab+ctx change).
