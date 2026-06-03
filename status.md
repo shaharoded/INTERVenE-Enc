@@ -664,3 +664,27 @@ clears 0.279 (top of multi-task CI).
 **Change.** dataset_config TERMINAL_OUTCOMES=[DEATH] (drop RELEASE); OUTCOMES=[];
 model_config phase2_n_epochs 100→200. transformer.py risk-head guard (for the later
 RELEASE-only model; no effect here). USE_QA_DATA=False.
+
+**CORRECTION (supervisor, 2026-06-03):** the two-model split is NOT DEATH-alone /
+LoS-alone. It is **terminal vs non-terminal**:
+- **m-term** — DEATH + LoS together (the terminal outcomes). OUTCOMES=[],
+  TERMINAL=[RELEASE, DEATH]. Risk head = DEATH; time head = DEATH(time-to-death)
+  + RELEASE(LoS). (s1-death/s1-los framing above is superseded; s1-death run was
+  killed before completing.)
+- **m-clin** — the non-terminal clinical outcomes + their time. OUTCOMES=clinical,
+  TERMINAL=[]. Risk + time on the 5 above-threshold clinical outcomes
+  (Hyperglycemia, Hypoglycemia, Hyperosmolality, CVD, Kidney; Ketoacidosis/Acidosis
+  auto-dropped <1% prevalence). No DEATH/RELEASE.
+Both at P2=200/P3=100, regular non-QA data, full test-set + bootstrap CI. Compare
+m-term DEATH vs multi-task DEATH (AUPRC 0.255); m-clin clinical-weighted AUPRC vs
+the multi-task clinical-weighted subset.
+
+### m-term  (terminal: DEATH + LoS, P2=200)
+
+**Hypothesis.** Splitting terminal (DEATH+LoS) from the clinical outcomes removes
+cross-task interference; with full Phase-2 training (cap 200) DEATH AUPRC may clear
+the multi-task CI top (0.279) and LoS MAE may improve. Risk head = DEATH only;
+time head = DEATH + RELEASE(LoS).
+
+**Change.** dataset_config TERMINAL=[RELEASE,DEATH], OUTCOMES=[]; phase2_n_epochs
+200. (transformer risk-head guard already added; inert here since DEATH is the risk target.)
