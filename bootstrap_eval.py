@@ -44,6 +44,7 @@ from transform_emr.config.model_config import MODEL_CONFIG, TRAINING_SETTINGS
 from transform_emr.embedder import EMREmbedding
 from transform_emr.transformer import EMREncoder
 from evaluation import evaluate_on_test_set, AUC_EXCLUDE, _min_positives
+from transform_emr.config.dataset_config import RELEASE_TOKEN, DEATH_TOKEN
 
 CKPT_DIR    = os.environ.get("BOOT_CKPT_DIR", os.path.join(PROJECT_ROOT, "checkpoints"))
 PHASE1_CKPT = os.path.join(CKPT_DIR, "phase1", "ckpt_best.pt")
@@ -157,6 +158,41 @@ for b in range(B):
 print(f"[boot] {B} resamples in {time.time()-t0:.1f}s")
 
 
+# ---- Length-of-stay bootstrap (release-only, mirrors evaluation.length_of_stay_mae;
+#      plus an all-patients "terminal time" version per supervisor: LoS = time of the
+#      last event, RELEASE for survivors / DEATH for the deceased). ----
+tcol = f"T_{RELEASE_TOKEN}"
+los_abs_err_release = []   # |pred_T_RELEASE - GT_release_time| over released patients
+los_abs_err_terminal = []  # |pred_T_RELEASE - GT_terminal_time| over all patients w/ a terminal
+if tcol in predictions.columns:
+    for p in pids:
+        pred_los = float(predictions.loc[p, tcol])
+        rel = gt_episodes.get(p, {}).get(RELEASE_TOKEN, [])
+        dth = gt_episodes.get(p, {}).get(DEATH_TOKEN, [])
+        if rel:
+            los_abs_err_release.append((p, abs(pred_los - float(min(rel)))))
+        term_times = [t for t in (list(rel) + list(dth))]
+        if term_times:
+            los_abs_err_terminal.append((p, abs(pred_los - float(min(term_times)))))
+los_rel_map = dict(los_abs_err_release)
+los_term_map = dict(los_abs_err_terminal)
+los_rel_pids = list(los_rel_map.keys())
+los_term_pids = list(los_term_map.keys())
+los_rel_arr = np.array([los_rel_map[p] for p in los_rel_pids]) if los_rel_pids else np.array([])
+los_term_arr = np.array([los_term_map[p] for p in los_term_pids]) if los_term_pids else np.array([])
+
+boot_los_rel, boot_los_term = [], []
+rng2 = np.random.RandomState(SEED + 1)
+if los_rel_arr.size:
+    nR = los_rel_arr.size
+    for _ in range(B):
+        boot_los_rel.append(los_rel_arr[rng2.randint(0, nR, size=nR)].mean())
+if los_term_arr.size:
+    nT = los_term_arr.size
+    for _ in range(B):
+        boot_los_term.append(los_term_arr[rng2.randint(0, nT, size=nT)].mean())
+
+
 def ci(arr):
     a = np.asarray(arr)
     return np.percentile(a, 2.5), np.percentile(a, 97.5), a.mean(), a.std()
@@ -169,6 +205,16 @@ for label, point, arr in [
 ]:
     lo, hi, mean, sd = ci(arr)
     print(f"{label}: point={point:.4f}  boot_mean={mean:.4f}  95%CI=[{lo:.4f}, {hi:.4f}]  sd={sd:.4f}")
+
+if boot_los_rel:
+    lo, hi, mean, sd = ci(boot_los_rel)
+    print(f"length_of_stay_mae_hours (RELEASE-only, n={los_rel_arr.size}): "
+          f"point={res['length_of_stay_mae_hours']:.4f}  boot_mean={mean:.4f}  "
+          f"95%CI=[{lo:.4f}, {hi:.4f}]  sd={sd:.4f}")
+if boot_los_term:
+    lo, hi, mean, sd = ci(boot_los_term)
+    print(f"length_of_stay_mae_hours (ALL-patients terminal time, n={los_term_arr.size}): "
+          f"boot_mean={mean:.4f}  95%CI=[{lo:.4f}, {hi:.4f}]  sd={sd:.4f}")
 
 print("\n--- per-outcome 95% CI ---")
 print(f"{'outcome':<34}{'AUROC [95% CI]':<30}{'AUPRC [95% CI]'}")

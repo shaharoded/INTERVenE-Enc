@@ -688,3 +688,23 @@ time head = DEATH + RELEASE(LoS).
 
 **Change.** dataset_config TERMINAL=[RELEASE,DEATH], OUTCOMES=[]; phase2_n_epochs
 200. (transformer risk-head guard already added; inert here since DEATH is the risk target.)
+
+### m-term RESULT (terminal DEATH+LoS, P2=200) — full data + bootstrap CI
+```
+DEATH AUPRC:  0.242952  95% CI [0.2233, 0.2659]   (multi-task: 0.255 [0.234,0.279])
+DEATH AUROC:  0.677673  95% CI [0.6601, 0.6959]   (multi-task: 0.684)
+LoS MAE (RELEASE-only, n=7446):       109.3592  95% CI [107.80, 110.96]  (multi-task: 117.55)
+LoS MAE (ALL-patients terminal time): 121.6892  95% CI [119.56, 123.73]  (new supplementary)
+phase2_epochs: 159 (early-stop, used the raised 200 cap); phase3 ep27
+```
+**Verdict.** DEATH: CI [0.223,0.266] OVERLAPS the multi-task [0.234,0.279] →
+isolating DEATH does NOT lift it. Confirms DEATH's weakness is intrinsic (rare
+terminal event from a 2-day window), not multi-task interference. **LoS: real
+gain** — m-term LoS CI [107.8,110.96] sits entirely BELOW the multi-task 117.55h
+(~8h better, non-overlapping). The terminal-focused time head predicts
+length-of-stay better without competing clinical outcomes; the raised P2 cap (159
+epochs vs old 100-cap) also helped. KEEP m-term as the LoS specialist; DEATH stays
+hard. Backed up checkpoints.bak_keep_m_term.
+
+**What I'd try next.** m-clin (non-terminal clinical outcomes, P2=200): does
+removing the terminal events lift the clinical heads vs the multi-task baseline?
