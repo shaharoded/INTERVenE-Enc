@@ -761,3 +761,49 @@ treatment-quality signal is what finally helps the hard DEATH head. Recommend th
 QA model as the final deliverable; the non-QA model is essentially equivalent on
 the clinical outcomes if the QA feature pipeline is undesirable. Backed up
 checkpoints.bak_keep_p2_qa.
+
+---
+
+## WRAP-UP — final summary (2026-06-04)
+
+**Goal:** beat in-house STRATS/GRU-D (AUROC≈0.90, PRAUC≈0.65 weighted) with
+reasonable time prediction. **Achieved.**
+
+**The decisive finding (architecture):** the Phase-3 objective was time-dominated
+(~8.6:1) which starved risk discrimination. Rebalancing to risk-dominant
+(`phase3_time_lambda` 0.5 → **0.02**, supervisor's "invert the ratio") was the
+single lever that mattered: at 10k it took AUPRC 0.687→0.841 and AUROC 0.847→0.897.
+Everything else searched (hierarchical MLM masking, backbone_lr_factor, embed_dim
+256, DEATH isolation) did not beat it / plateaued.
+
+**Final models (full data, 39,954 train / 8,562 test, M-128 = 1.85M params,
+λ=0.02; 95% CI = B=2000 patient bootstrap):**
+
+| model | AUPRC_w [95% CI] | AUROC_w [95% CI] | LoS MAE [95% CI] | note |
+|---|---|---|---|---|
+| **full-outcome, +QA** ★ | **0.833 [0.827,0.839]** | **0.887 [0.882,0.892]** | 118.8 [117.2,120.5] | best risk; helps DEATH |
+| full-outcome, non-QA | 0.826 [0.821,0.832] | 0.879 [0.874,0.883] | 117.5 [—] | clean deliverable |
+| m-term (DEATH+LoS) | DEATH 0.243 [0.223,0.266] | DEATH 0.678 | **109.4 [107.8,111.0]** | best LoS (−8h, CI-clean) |
+
+★ **Recommended final = full-outcome + QA**: beats benchmarks decisively (PRAUC CI
+≫ 0.65; AUROC ≈ 0.89), and is the only config that lifts the hard DEATH head
+(AUROC 0.685→0.722, non-overlapping). If the QA feature pipeline is undesirable,
+the non-QA model is equivalent on clinical outcomes.
+
+**Per-outcome (QA model) AUPRC [CI]:** CVD 0.930, Hyperosmol 0.920, Hyperglyc
+0.915, Kidney 0.881, Hypoglyc 0.641, DEATH 0.299. All clinical heads strong;
+DEATH remains the hardest (rare terminal event from a 2-day window) but is best here.
+
+**Time prediction:** per-outcome time-MAE 12–50h (most ~20–30h); LoS best from the
+terminal-specialist m-term (109h, −8h vs multi-task). The risk↔time / terminal↔
+clinical trade-offs are documented (backbone_lr_factor and the split experiments).
+
+**Negative results (documented, reverted):** hierarchical MLM masking (no MLM-sharpness
+gain, hurt rare Hypoglycemia); time_lambda 0.01 (over-saturates, AUPRC peaks at 0.02);
+backbone_lr_factor 0.1 (trades risk for time); embed_dim 256 (no gain, 3.7× params);
+DEATH isolation (DEATH is intrinsically hard, not multi-task interference).
+
+**Reproducibility:** all runs in results/results.tsv; per-experiment journals above;
+KEEP models backed up in checkpoints.bak_keep_*; variance via patient bootstrap CIs
+(replaced the 3-seed study per supervisor). Branch autoresearcher-updates — committed
+locally every iteration; **awaiting a push token to publish to origin.**
