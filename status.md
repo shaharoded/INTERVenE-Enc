@@ -737,3 +737,27 @@ KEEP if weighted AUPRC clears the non-QA deliverable CI (0.826 [0.821,0.832]).
 **Change.** dataset_config USE_QA_DATA True; OUTCOMES=clinical, TERMINAL=[RELEASE,DEATH]
 restored; model_config phase2_n_epochs reverted 200→100 (match the deliverable so
 QA is the only variable). Full rebuild (vocab+ctx change).
+
+### p2-qa RESULT — QA-data ablation on the full-outcome model + bootstrap CI
+```
+                          QA              non-QA deliverable   verdict
+patient_auprc_weighted:   0.832548        0.826051             +0.0064  QA CI[0.8272,0.8386] vs [0.8205,0.8319]
+patient_auroc_weighted:   0.886932        0.878531             +0.0084  QA CI[0.8821,0.8916] vs [0.8737,0.8834]
+length_of_stay_mae_hours: 118.83 [117.2,120.5]  117.55         ~same (overlap)
+DEATH AUROC:              0.722 [0.705,0.738]    0.685 [0.660,0.696]   NON-OVERLAPPING (real lift)
+DEATH AUPRC:              0.299 [0.275,0.326]    0.255 [0.234,0.279]   +0.043 (point above non-QA CI)
+phase2_epochs: 101 (cap), phase3 ep30; ctx_dim 16, vocab 523
+```
+Per-outcome AUPRC [CI]: CVD 0.930 [0.911,0.949], Hyperosmol 0.920 [0.913,0.926],
+Hyperglyc 0.915 [0.909,0.923], Kidney 0.881 [0.872,0.889], Hypoglyc 0.641
+[0.610,0.672], DEATH 0.299 [0.275,0.326].
+
+**Verdict.** SOFT-KEEP / better-but-small. QA data improves every risk metric
+(AUPRC +0.0064 ≈2σ, AUROC +0.0084, and the only real lift on DEATH so far:
+AUROC 0.685→0.722 non-overlapping, AUPRC 0.255→0.299) with no regression (LoS
+~same). The headline deltas are just UNDER the program's formal +0.010 KEEP
+threshold, but the bootstrap shows they exceed sampling noise. The %_PATTERN%
+treatment-quality signal is what finally helps the hard DEATH head. Recommend the
+QA model as the final deliverable; the non-QA model is essentially equivalent on
+the clinical outcomes if the QA feature pipeline is undesirable. Backed up
+checkpoints.bak_keep_p2_qa.
