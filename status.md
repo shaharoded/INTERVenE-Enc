@@ -807,3 +807,129 @@ DEATH isolation (DEATH is intrinsically hard, not multi-task interference).
 KEEP models backed up in checkpoints.bak_keep_*; variance via patient bootstrap CIs
 (replaced the 3-seed study per supervisor). Branch autoresearcher-updates — committed
 locally every iteration; **awaiting a push token to publish to origin.**
+
+**Ablation spec locked (supervisor-provided constants, 2026-06-04).** Naïve-interval
+ablation builds the FULL pipeline from concept_events.csv (raw point events), mirroring
+the STRATS preprocessing so outcomes match:
+- Targets (= STRATS OUTCOME_NAMES, support ≥0.01): DEATH, DISGLYCEMIA_Hyperglycemia,
+  DISGLYCEMIA_Hypoglycemia, KIDNEY_COMPLICATION, CARDIO-VASCULAR_DISORDER, HYPEROSMOLALITY
+  (+ RELEASE→LoS). KETOACIDOSIS/ACIDOSIS NOT in the set (also auto-dropped <1% in KB model)
+  → same effective 6 AUC outcomes as the KB model. Clean comparison.
+- Event outcomes: regex alias raw→canonical _EVENT token. EVENT_OUTCOME_REGEX:
+  DEATH ^DEATH(_EVENT)?$, KIDNEY_COMPLICATION, CARDIO-?VASCULAR_DISORDER, HYPEROSMOLALITY.
+- DISGLYCEMIA synthetic from (?:BASE_)?GLUCOSE_MEASURE(MENT)?: hypo severe<=54 / recurrent<=70(x2),
+  hyper severe>=250 / recurrent>=180(x2), per-patient time-ordered; emit
+  DISGLYCEMIA_EVENT_Hyperglycemia/Hypoglycemia POINT events.
+- Outcomes/MEAL/treatments/ADMISSION = points (never intervaled). Only *_MEASURE-family
+  measurements get 5-bin equal-frequency intervals (per-concept train-fit; merge consecutive
+  same-bin readings with gap<=24h into START/END spans).
+- Emit outcome tokens as ConceptName=<canonical>_EVENT, Value=<subtype or True> so the
+  tokenizer yields the exact model tokens; map raw measure names that differ from TAK-repo
+  (e.g. BODY_TEMPERATURE->BODY_TEMPERATURE_MEASURE) so _add_parent_raw_concepts resolves.
+- Then rebuild scaler/tokenizer, retrain M-128 (λ=0.02), full test + bootstrap CI vs KB model.
+Holding until concept_events.csv upload completes (watcher armed).
+
+### naive-intervals RESULT pending — validation + launch (2026-06-04)
+Naive build (build_naive_temporal.py): 12.09M rows, 57,078 patients, 49 concepts.
+TAK resolution: 44/49 in repo; 5 treatment/dosage leaves (ANTIDIABETIC_HIGH_HYPO_HOSPITAL_BITZUA,
+BASAL_DOSAGE, BOLUS_DOSAGE, HYPERTONIC_SALINE_BITZUA, INSULIN_IV_DOSAGE) resolve via the
+gated raw-parent fallback (equiv. to raw TAK entries; repo unmutated).
+Per-outcome patient support (all >=1%, none dropped): HYPEROSMOLALITY 0.406, DISGLYCEMIA_Hyper
+0.382, KIDNEY 0.193, DEATH 0.127, DISGLYCEMIA_Hypo 0.091, CARDIO-VASCULAR 0.059, RELEASE 0.873.
+CAVEAT: matches KB prevalence on all outcomes EXCEPT KIDNEY (0.193 naive vs 0.317 KB) — STRATS
+regex takes only the raw KIDNEY_COMPLICATION event; KB derives extra kidney complications. So
+kidney mixes interval+label derivation; framing = "KB pipeline vs naive/STRATS pipeline".
+Config: USE_NAIVE_INTERVALS=True, USE_QA=False, full outcomes (risk+time heads) + RELEASE(LoS),
+embed_dim 128, λ=0.02, P2=100/P3=100. Data source swapped to temporal_data.naive.csv (KB backed
+up to temporal_data.kb.csv). Compare vs non-QA KB deliverable (AUPRC 0.826 / AUROC 0.879).
+
+### ANALYSIS — why DEATH is the only weak outcome (PRAUC <0.3 vs STRATS/GRU-D ~0.5)
+
+Investigated on death-event timing (concept_events.csv DEATH vs ADMISSION; GPU-free).
+Death prevalence 0.127; time-to-death from admission: median 8.4 d, p75 13.3 d,
+p90 24.2 d, p95 30.6 d, max 43 d. ZERO deaths within the 2-day input window.
+
+ROOT CAUSE — label-horizon mismatch (metric definition, not modeling):
+- STRATS/GRU-D preprocessing labels DEATH within a 12-DAY future horizon
+  (label_mode=future, horizon_days=12) → scores only the 77.6% of deaths at 2–14 d.
+- Our immutable evaluation.py labels DEATH "anywhere in the admission" — NO horizon
+  → also counts the 22.4% of deaths at 15–43 d (incl. 5.6% >30 d) as positives.
+- Deaths at 15–43 d are essentially unpredictable from a 2-day input; the model
+  correctly assigns them low scores, so they sit as low-score positives that crush
+  precision/recall → DEATH PRAUC 0.5 (near-term, STRATS) → <0.3 (all deaths, ours).
+- The same no-horizon label injects unlearnable positives into Phase-3 training too,
+  compounding the effect.
+
+CONCLUSION: DEATH's weakness is a metric-protocol difference (death-within-12d vs
+death-ever-no-horizon), NOT an architecture/method deficiency. Under STRATS's
+horizon-matched protocol our DEATH PRAUC should be much closer to 0.5. All other
+outcomes match/beat the benchmarks. evaluation.py is immutable so the headline keeps
+the harder no-horizon label; a horizon-matched DEATH PRAUC can be computed offline
+on a saved checkpoint (P_DEATH vs per-patient death time, restrict positives to
+<=14 d) to demonstrate parity — DEFERRED until the GPU frees after the naive run.
+
+### CORRECTION — DEATH root cause is value DISCRETIZATION, not label horizon
+
+The earlier label-horizon hypothesis was TESTED on the best checkpoint
+(death_horizon.py) and REFUTED. DEATH PRAUC/AUROC by label horizon:
+  anytime (headline):  PRAUC 0.265  AUROC 0.683  (n_pos 1115, prev 0.130)
+  <=14d (STRATS):      PRAUC 0.240  AUROC 0.699  (n_pos 886,  prev 0.103)
+  <=30d:               PRAUC 0.259  AUROC 0.685
+  <=7d:                PRAUC 0.155  AUROC 0.732
+PRAUC is flat-to-LOWER under a horizon (shorter horizon -> lower prevalence ->
+lower PRAUC baseline); AUROC stays ~0.68-0.73 throughout. So matching STRATS's
+12-day horizon does NOT recover DEATH (still 0.24) -> horizon is NOT the cause.
+
+TRUE root cause (evidence-based): the token/interval paradigm's VALUE DISCRETIZATION.
+- DEATH AUROC ~0.70 vs ~0.90 on every other outcome -> genuine ranking weakness.
+- naive 5-bin intervals ~ KB intervals on DEATH (both PRAUC ~0.26) -> discretization
+  GRANULARITY is irrelevant; the discretization ITSELF is the limiter.
+- Mortality is driven by CONTINUOUS severity (how extreme the vitals/labs are + trends).
+  Our model quantizes each measurement into a few states/bins, capping the extreme-
+  magnitude signal that predicts death. STRATS/GRU-D ingest continuous values and keep it.
+- The other 5 outcomes are themselves threshold/lab-defined events, so discretization
+  preserves their signal; DEATH is the one holistic-severity outcome where quantization
+  hurts most -> the single weak head.
+IMPLICATION (method writeup): to close DEATH, inject continuous value alongside the
+discretized token (a scalar value channel / value-aware embedding a la STRATS) or
+much finer bins for severity-relevant measures. Not a quick fix; a paradigm addition.
+This is the one place the discrete-token EMR encoder is structurally disadvantaged vs
+continuous-value baselines, and it is isolated to DEATH.
+
+### naive-intervals RESULT — KB-interval ablation (full data + bootstrap CI) — VERDICT: DISCARD (kept in history)
+```
+                          naive 5-bin            KB intervals (deliverable)
+patient_auprc_weighted:   0.838213 [0.833,0.844] 0.826051 [0.821,0.832]
+patient_auroc_weighted:   0.894002 [0.889,0.899] 0.878531 [0.874,0.883]
+length_of_stay_mae_hours: 112.12  [110.5,113.7]  117.55
+```
+Per-outcome AUPRC [95% CI]  (naive vs KB):
+  CARDIO-VASCULAR  0.927 [0.907,0.947]  vs 0.931  (tied)
+  DEATH            0.266 [0.242,0.291]  vs 0.255  (tied)
+  DISGLYCEMIA_Hyper 0.928 [0.922,0.934] vs 0.914  (~tied, naive +0.014)
+  DISGLYCEMIA_Hypo 0.668 [0.638,0.698]  vs 0.649  (tied)
+  HYPEROSMOLALITY  0.914 [0.907,0.920]  vs 0.918  (tied)
+  KIDNEY           0.940 [0.931,0.948]  vs 0.871  (NOT comparable: naive/STRATS kidney
+                   label rarer 0.198 vs 0.317 -> easier target; drives the headline gap)
+Finding: on every interval-COMPARABLE outcome the CIs OVERLAP -> KB temporal-abstraction
+intervals give NO measurable predictive advantage over naive 5-bin equal-frequency
+discretization. The headline AUPRC/AUROC edge for naive is attributable to the kidney
+label-derivation difference (+LoS). Verdict DISCARD as a model (ablation only); the
+scientific result (KB intervals ~= naive intervals here) is the takeaway. Code kept in
+history; repo default restored to the KB pipeline.
+
+### vchannel  (DEATH value-channel experiment, on naive pipeline)
+
+**Hypothesis.** DEATH's weakness is value DISCRETIZATION (continuous severity quantized
+away). Add a continuous value channel: EMREmbedding sums value_proj(z-scored raw
+measurement value) into the token embedding (Linear(1,D,bias=False); zero for non-
+measurements/pad/masked). Built on the naive pipeline (only source with per-token raw
+values; naive~=KB so a clean base). Expect DEATH AUROC/AUPRC to rise toward STRATS;
+other outcomes unchanged. KEEP if DEATH lifts beyond its CI (naive DEATH 0.266 [0.242,0.291]).
+
+**Change.** USE_VALUE_CHANNEL=True, USE_NAIVE_INTERVALS=True. build_naive emits z-scored
+RawValue per measurement token (train-fit); DataProcessor carries ValueScalar through
+_expand_tokens/_insert_null; EMRDataset/collate add value_scalar [B,T]; embedder value_proj;
+threaded (optional, default None -> KB byte-identical) through encode/forward/predict +
+train/eval/inference/diagnose; apply_mlm_mask zeros value at masked positions. Measurements
+only (matches the severity hypothesis); dosages/treatments/outcomes/meal stay value-less.
