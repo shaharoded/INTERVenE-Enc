@@ -933,3 +933,68 @@ _expand_tokens/_insert_null; EMRDataset/collate add value_scalar [B,T]; embedder
 threaded (optional, default None -> KB byte-identical) through encode/forward/predict +
 train/eval/inference/diagnose; apply_mlm_mask zeros value at masked positions. Measurements
 only (matches the severity hypothesis); dosages/treatments/outcomes/meal stay value-less.
+
+### vchannel RESULT — DEATH value-channel experiment — VERDICT: DISCARD (negative for DEATH; helps time)
+Full data + bootstrap CI (vs naive, the no-value base):
+```
+                    vchannel             naive
+DEATH AUPRC:        0.261 [0.238,0.284]  0.266 [0.242,0.291]   OVERLAP -> unchanged
+DEATH AUROC:        0.693 [0.676,0.710]  0.683 [0.665,0.700]   OVERLAP -> unchanged
+patient_auprc_w:    0.831 [0.826,0.837]  0.838 [0.833,0.844]   ~tied
+patient_auroc_w:    0.887 [0.882,0.892]  0.894 [0.889,0.899]   ~tied
+LoS MAE (RELEASE):  109.14 [107.5,110.7] 112.12               better (continuous value helps regression)
+time-MAE per outcome: BEST across all runs (CVD 10.0, Kidney 13.5, Hyperosmol 16.2, Hyperglyc 19.5)
+```
+Adding a continuous per-token value channel (z-scored raw measurement value -> Linear(1,D)
+summed into the token embedding) did NOT improve DEATH ranking (AUPRC/AUROC CIs overlap naive),
+but DID improve the TIME heads + LoS (continuous magnitude helps regression). Verdict DISCARD
+for the DEATH goal; code kept in history (gated USE_VALUE_CHANNEL, KB byte-identical when off).
+
+### DEATH — final picture (three hypotheses tested, all refuted)
+DEATH is robustly ~0.26 AUPRC / ~0.69 AUROC across EVERY intervention:
+- label horizon (death_horizon.py): refuted — <=14d PRAUC 0.24, no recovery.
+- multi-task interference (m-term DEATH-isolated): refuted — DEATH 0.243, CI overlaps.
+- value discretization (vchannel continuous value): refuted — DEATH 0.261, CI overlaps.
+CONCLUSION: within this 2-day-input encoder, DEATH discrimination is structurally capped
+(~0.69 AUROC) and none of representation/horizon/isolation moves it. Mortality here is
+median 8.4d out, driven by deterioration not present in the 2-day window — the binding
+constraint is the short input window + the additive value integration, not discretization
+per se. Matching STRATS/GRU-D (~0.5 PRAUC) on DEATH would need a more expressive
+value-conditioned mechanism (STRATS-style triplet attention) and/or a longer input window
+— a paradigm change, out of scope for the current encoder. Every other outcome already
+matches/beats the benchmarks; DEATH is the single structural limitation, now well-characterised.
+
+---
+
+## CONSOLIDATED — DEATH limitation (supersedes intermediate hypotheses above; writeup-ready)
+
+**Observation.** DEATH is the only weak head: AUPRC ~0.26 [0.238,0.291], AUROC ~0.69
+[0.66,0.71] (95% bootstrap), vs AUROC 0.85-0.97 / AUPRC 0.65-0.94 on all five other
+outcomes. In-house STRATS/GRU-D report ~0.5 PRAUC on DEATH.
+
+**Three candidate causes were each tested and REFUTED (all on full data, bootstrap CI):**
+1. *Eval label horizon* — our `evaluation.py` labels death "anywhere in admission"
+   (no horizon) vs STRATS' 12-day horizon. TEST (`death_horizon.py`, best ckpt):
+   recomputing DEATH at <=14d gives PRAUC 0.24 (not higher); AUROC ~0.68-0.73 at every
+   horizon. -> horizon is NOT the cause. (NOTE: this refutes the earlier
+   "no-horizon label" block; that hypothesis is superseded.)
+2. *Multi-task interference* — dedicated DEATH+LoS model (m-term, P2=200): DEATH AUPRC
+   0.243 [0.223,0.266], CI overlaps the multi-task 0.255. -> isolation does NOT help.
+3. *Value discretization* — continuous value channel (vchannel: z-scored raw value ->
+   Linear(1,D) into the token embedding): DEATH AUPRC 0.261 [0.238,0.284], CI overlaps
+   naive 0.266. -> restoring continuous severity does NOT help DEATH ranking
+   (though it DID improve the time heads + LoS). The "discretization is the cause"
+   intermediate hypothesis is therefore REFUTED.
+
+**Standing conclusion (best supported).** DEATH discrimination is *structurally capped*
+(~0.69 AUROC) in this encoder and is invariant to horizon, task-isolation, and value
+representation. The binding constraints are (a) the 2-day INPUT WINDOW — death occurs a
+median 8.4 d out (p90 24 d), driven by deterioration not yet present at 2 days — and
+(b) the additive value integration vs a value-conditioned attention. It is NOT explained
+by label horizon, multi-task interference, or value discretization (all tested).
+
+**What would be needed (future work, out of current scope).** (i) a longer / sliding input
+window for the terminal event; (ii) STRATS-style value-conditioned (triplet) attention
+rather than an additive scalar channel; (iii) possibly a survival/time-to-event objective
+for DEATH. Each is a paradigm addition, not a config tweak. Every other outcome already
+matches/beats the benchmarks; DEATH is the single, now fully-characterised structural limit.
