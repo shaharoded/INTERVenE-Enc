@@ -18,5 +18,9 @@ data/
 checkpoints/
 # Local checkpoint backups (KEEP recovery artifacts) — never commit
 checkpoints.bak_keep_*/
+checkpoints_export/
+_pulled/
+agent.bundle
+.agent_amendment.txt
 # data is an environment symlink to /workspace/autoresearch/data
 /data
