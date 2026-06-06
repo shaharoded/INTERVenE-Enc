@@ -16,10 +16,10 @@ import pandas as pd
 from typing import Optional
 
 # ───────── local code ─────────────────────────────────────────────────── #
-from transform_emr.config.dataset_config import (
+from intervene_enc.config.dataset_config import (
     ADMISSION_TOKEN, TERMINAL_OUTCOMES, OUTCOMES, MEAL_TOKENS
 )
-from transform_emr.schedulers import linear_schedule
+from intervene_enc.schedulers import linear_schedule
 
 
 def set_seed(seed: int):
@@ -105,7 +105,7 @@ def logger(func):
             ts = None
 
         try:
-            from transform_emr.config.model_config import MODEL_CONFIG
+            from intervene_enc.config.model_config import MODEL_CONFIG
         except Exception:
             MODEL_CONFIG = None
 
@@ -1626,7 +1626,7 @@ def build_patient_labels(model, batch, training_settings, device):
              ``abs_ts`` — no extra collate needed.
 
     Args:
-        model              : EMREncoder (uses ``outcome_names`` and the
+        model              : InterveneEncoder (uses ``outcome_names`` and the
                              tokenizer for the outcome → token-id mapping).
         batch              : dict with ``position_ids`` [B, T] and ``abs_ts``
                              [B, T] (normalised by 336 h).

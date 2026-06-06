@@ -5,7 +5,7 @@ The default invocation (`python api.py`) is the immutable training+eval
 pipeline. The DO NOT MODIFY rule applies to that path: the per-run summary
 block printed after the "---" separator is the ground-truth result for every
 ledger row. To experiment with model architecture or hyperparameters, edit
-files under transform_emr/ (and its config/ sub-package).
+files under intervene_enc/ (and its config/ sub-package).
 
 Four additional CLI modes wrap utility flows on top of the same data
 pipeline (none of them affect a default training run):
@@ -27,7 +27,7 @@ Usage:
     python api.py --diagnose > results/logs/diag.log 2>&1
     python api.py --bootstrap 2000 > results/logs/boot.log 2>&1
 
-The agent reads program.md for context, edits transform_emr/ files, then runs
+The agent reads program.md for context, edits intervene_enc/ files, then runs
 this script to train and evaluate. The summary block (after the "---" separator)
 is the ground-truth result for each run.
 
@@ -76,13 +76,13 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from transform_emr.dataset import (
+from intervene_enc.dataset import (
     DataProcessor, EMRTokenizer, EMRDataset, collate_emr, get_dataloader,
 )
-from transform_emr.config.dataset_config import TAK_REPO_PATH, USE_QA_DATA
-from transform_emr.config.model_config import MODEL_CONFIG, TRAINING_SETTINGS
-from transform_emr.embedder import EMREmbedding, train_embedder
-from transform_emr.transformer import EMREncoder, pretrain_transformer, finetune_transformer
+from intervene_enc.config.dataset_config import TAK_REPO_PATH, USE_QA_DATA
+from intervene_enc.config.model_config import MODEL_CONFIG, TRAINING_SETTINGS
+from intervene_enc.embedder import EMREmbedding, train_embedder
+from intervene_enc.transformer import InterveneEncoder, pretrain_transformer, finetune_transformer
 
 from evaluation import evaluate_on_test_set, bootstrap_evaluate
 
@@ -309,12 +309,12 @@ if _CLI is not None and (_CLI.diagnose or _CLI.bootstrap):
 
     _embedder, *_ = EMREmbedding.load(EMBEDDER_CHECKPOINT, tokenizer=_tokenizer)
     _embedder.to(_device)
-    _model, *_ = EMREncoder.load(str(_ckpt), embedder=_embedder, attach_task_heads=True)
+    _model, *_ = InterveneEncoder.load(str(_ckpt), embedder=_embedder, attach_task_heads=True)
     _model.to(_device)
     print(f"[cli] loaded model from {_ckpt}")
 
     if _CLI.diagnose:
-        from transform_emr.diagnose import run_diagnostics
+        from intervene_enc.diagnose import run_diagnostics
         _p = TRAINING_SETTINGS.get("phase2_mlm_ratio", 0.15)
         run_diagnostics(_model, _val_dl, n_batches=4, p=_p)
         print("[diag] done.")
@@ -409,7 +409,7 @@ if not _embedder_reused:
 # ---------------------------------------------------------------------------
 # Phase 2 — Bidirectional MLM pre-training over the learned embeddings
 # ---------------------------------------------------------------------------
-encoder = EMREncoder(cfg=MODEL_CONFIG, embedder=embedder)
+encoder = InterveneEncoder(cfg=MODEL_CONFIG, embedder=embedder)
 encoder, _, val_losses = pretrain_transformer(
     model             = encoder,
     train_dl          = train_dl,
@@ -429,7 +429,7 @@ _p2_ckpt = _p2_best if _p2_best.exists() else (_p2_last if _p2_last.exists() els
 if _p2_ckpt is not None:
     # attach_task_heads=True rebuilds the TaskHeads module on top of the Phase-2
     # encoder even though P2 didn't train heads.
-    model_p3, *_ = EMREncoder.load(str(_p2_ckpt), embedder=embedder, attach_task_heads=True)
+    model_p3, *_ = InterveneEncoder.load(str(_p2_ckpt), embedder=embedder, attach_task_heads=True)
 else:
     model_p3 = encoder
     if model_p3.task_heads is None:
@@ -477,13 +477,13 @@ _p2_path = _p2_best
 _p2_last_path = _p2_last
 
 if _p3_path.exists():
-    best_model, *_ = EMREncoder.load(str(_p3_path), embedder=embedder, attach_task_heads=True)
+    best_model, *_ = InterveneEncoder.load(str(_p3_path), embedder=embedder, attach_task_heads=True)
 elif _p3_last.exists():
-    best_model, *_ = EMREncoder.load(str(_p3_last), embedder=embedder, attach_task_heads=True)
+    best_model, *_ = InterveneEncoder.load(str(_p3_last), embedder=embedder, attach_task_heads=True)
 elif _p2_path.exists():
-    best_model, *_ = EMREncoder.load(str(_p2_path), embedder=embedder, attach_task_heads=True)
+    best_model, *_ = InterveneEncoder.load(str(_p2_path), embedder=embedder, attach_task_heads=True)
 elif _p2_last_path.exists():
-    best_model, *_ = EMREncoder.load(str(_p2_last_path), embedder=embedder, attach_task_heads=True)
+    best_model, *_ = InterveneEncoder.load(str(_p2_last_path), embedder=embedder, attach_task_heads=True)
 else:
     best_model = model_p3
 

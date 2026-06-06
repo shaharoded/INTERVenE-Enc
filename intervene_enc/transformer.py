@@ -33,16 +33,16 @@ from pathlib import Path
 from tqdm.auto import tqdm
 
 # ───────── local code ─────────────────────────────────────────────────── #
-from transform_emr.embedder import EMREmbedding
-from transform_emr.config.model_config import *
-from transform_emr.config.dataset_config import (
+from intervene_enc.embedder import EMREmbedding
+from intervene_enc.config.model_config import *
+from intervene_enc.config.dataset_config import (
     OUTCOMES, TERMINAL_OUTCOMES, RELEASE_TOKEN,
 )
-from transform_emr.utils import (
+from intervene_enc.utils import (
     set_seed, build_luts, apply_mlm_mask, logger, plot_losses,
     time_to_neighbour_targets, build_patient_labels,
 )
-from transform_emr.schedulers import LambdaScheduleController, LRScheduleController
+from intervene_enc.schedulers import LambdaScheduleController, LRScheduleController
 
 
 # ───────── components  ───────────────────────────────────────────────── #
@@ -272,7 +272,7 @@ class TaskHeads(nn.Module):
 
 
 # ───────── the BERT-style encoder that consumes EMREmbedding ──────────── #
-class EMREncoder(nn.Module):
+class InterveneEncoder(nn.Module):
     """
     Bidirectional transformer encoder over an external :class:`EMREmbedding`.
 
@@ -302,9 +302,9 @@ class EMREncoder(nn.Module):
 
         vocab_size = self.embedder.decoder.out_features
 
-        assert hasattr(self.embedder.tokenizer, "id2token"), "[EMREncoder] Embedder missing id2token map"
+        assert hasattr(self.embedder.tokenizer, "id2token"), "[InterveneEncoder] Embedder missing id2token map"
         assert len(self.embedder.tokenizer.id2token) == vocab_size, (
-            f"[EMREncoder] id2token size mismatch: got {len(self.embedder.tokenizer.id2token)}, expected {vocab_size}"
+            f"[InterveneEncoder] id2token size mismatch: got {len(self.embedder.tokenizer.id2token)}, expected {vocab_size}"
         )
 
         # --- Backbone ---
@@ -343,7 +343,7 @@ class EMREncoder(nn.Module):
         in_vocab = [n for n in all_config_outcomes if n in tok.token2id]
         missing_outcomes = [n for n in all_config_outcomes if n not in tok.token2id]
         if missing_outcomes:
-            print(f"[EMREncoder] Outcomes not in tokenizer vocab (ignored): {missing_outcomes}")
+            print(f"[InterveneEncoder] Outcomes not in tokenizer vocab (ignored): {missing_outcomes}")
 
         if getattr(tok, "outcome_patient_ratios", None):
             valid_set = set(tok.outcome_patient_ratios.keys())
@@ -353,7 +353,7 @@ class EMREncoder(nn.Module):
 
         if not valid_outcomes:
             raise ValueError(
-                f"[EMREncoder] No valid outcomes found! Configured outcomes: {all_config_outcomes}."
+                f"[InterveneEncoder] No valid outcomes found! Configured outcomes: {all_config_outcomes}."
             )
         self.outcome_names = valid_outcomes
         self.num_outcomes = len(self.outcome_names)
@@ -374,7 +374,7 @@ class EMREncoder(nn.Module):
         # checkpoints stay slim and the head buffer indices can be tokenizer-derived.
         self.task_heads: TaskHeads | None = None
 
-        print(f"[EMREncoder]: Total params: {self.get_num_params()/1e6:.2f} M")
+        print(f"[InterveneEncoder]: Total params: {self.get_num_params()/1e6:.2f} M")
 
     # -------------------------------------------------------- helpers --- #
     def _init_weights(self, module):
@@ -497,7 +497,7 @@ class EMREncoder(nn.Module):
         """
         if self.task_heads is None:
             raise RuntimeError(
-                "[EMREncoder.predict] task_heads not attached. Call "
+                "[InterveneEncoder.predict] task_heads not attached. Call "
                 "model.attach_task_heads() before Phase-3 training / inference."
             )
         hidden, pad_mask = self.encode(
@@ -600,7 +600,7 @@ class EMREncoder(nn.Module):
     @classmethod
     def load(cls, path, embedder, map_location="cpu", attach_task_heads=None):
         """
-        Purpose: Reconstruct an EMREncoder from a checkpoint.
+        Purpose: Reconstruct an InterveneEncoder from a checkpoint.
         Method:  Validate vocab + outcomes against the supplied embedder; build
                  the model; optionally re-attach task heads when the ckpt was
                  saved with them or the caller explicitly requests it.
@@ -618,20 +618,20 @@ class EMREncoder(nn.Module):
         """
         ckpt = torch.load(path, map_location=map_location, weights_only=True)
         if "config" not in ckpt:
-            raise ValueError("[EMREncoder.load] Invalid checkpoint: missing 'config'.")
+            raise ValueError("[InterveneEncoder.load] Invalid checkpoint: missing 'config'.")
 
         expected_vocab = ckpt["vocab_size"]
         actual_vocab = embedder.decoder.out_features
         if expected_vocab != actual_vocab:
             raise ValueError(
-                f"[EMREncoder.load] Embedder vocab size mismatch: ckpt={expected_vocab}, embedder={actual_vocab}"
+                f"[InterveneEncoder.load] Embedder vocab size mismatch: ckpt={expected_vocab}, embedder={actual_vocab}"
             )
 
         expected_outcome_names = set(ckpt.get("outcome_names", []))
         current_outcomes = set(OUTCOMES + TERMINAL_OUTCOMES)
         if expected_outcome_names and not expected_outcome_names.issubset(current_outcomes):
             raise ValueError(
-                f"[EMREncoder.load] Outcome configuration mismatch.\n"
+                f"[InterveneEncoder.load] Outcome configuration mismatch.\n"
                 f"  ckpt: {sorted(expected_outcome_names)}\n  current: {sorted(current_outcomes)}"
             )
 
@@ -660,14 +660,14 @@ class EMREncoder(nn.Module):
         if _th_missing and not want_heads:
             missing -= _th_missing
         elif _th_missing and want_heads:
-            print(f"[EMREncoder.load] task_heads not in ckpt — keeping random init "
+            print(f"[InterveneEncoder.load] task_heads not in ckpt — keeping random init "
                   f"({len(_th_missing)} keys). Expected on first Phase-3 epoch.")
             missing -= _th_missing
 
         if missing:
-            raise RuntimeError(f"[EMREncoder.load] Missing required keys: {sorted(missing)}")
+            raise RuntimeError(f"[InterveneEncoder.load] Missing required keys: {sorted(missing)}")
         if unexpected:
-            raise RuntimeError(f"[EMREncoder.load] Unexpected keys: {sorted(unexpected)}")
+            raise RuntimeError(f"[InterveneEncoder.load] Unexpected keys: {sorted(unexpected)}")
         model.load_state_dict(state, strict=False)
 
         embedder_device = next(embedder.parameters()).device
@@ -701,7 +701,7 @@ def pretrain_transformer(model, train_dl, val_dl, resume=True,
                • aux losses follow LambdaScheduleController calibration.
 
     Args:
-        model (EMREncoder): bidirectional encoder with attached embedder.
+        model (InterveneEncoder): bidirectional encoder with attached embedder.
         train_dl / val_dl : DataLoaders.
         resume (bool): resume from ``ckpt_last`` if present.
         checkpoint_path (str): destination for the best checkpoint.
@@ -752,7 +752,7 @@ def pretrain_transformer(model, train_dl, val_dl, resume=True,
 
     if resume and ckpt_last.exists():
         print(f"[Phase-2]: Loading model from checkpoint: {ckpt_last}")
-        loaded, start_epoch, best_val, opt_state, sch_state, lambda_schedule_state = EMREncoder.load(
+        loaded, start_epoch, best_val, opt_state, sch_state, lambda_schedule_state = InterveneEncoder.load(
             ckpt_last, embedder=model.embedder, map_location=device,
         )
         model = loaded
@@ -952,7 +952,7 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
              full ``phase3_learning_rate``.
 
     Args:
-        model (EMREncoder): Phase-2 best ckpt loaded.
+        model (InterveneEncoder): Phase-2 best ckpt loaded.
         train_dl / val_dl : DataLoaders (natural distribution; ``pos_weight``
                             handles imbalance).
         resume (bool): resume from ``ckpt_last`` if present.
@@ -1010,7 +1010,7 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
 
     if resume and ckpt_last.exists():
         print(f"[Phase-3]: Loading model from checkpoint: {ckpt_last}")
-        loaded, start_epoch, best_val, opt_state, *_ = EMREncoder.load(
+        loaded, start_epoch, best_val, opt_state, *_ = InterveneEncoder.load(
             ckpt_last, embedder=model.embedder, map_location=device, attach_task_heads=True,
         )
         model = loaded

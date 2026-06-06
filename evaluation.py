@@ -41,9 +41,9 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from transform_emr.dataset import DataProcessor, EMRDataset
-from transform_emr.config.dataset_config import TAK_REPO_PATH, OUTCOME_RARE_THRESHOLD_PCT, RELEASE_TOKEN
-from transform_emr.inference import predict
+from intervene_enc.dataset import DataProcessor, EMRDataset
+from intervene_enc.config.dataset_config import TAK_REPO_PATH, OUTCOME_RARE_THRESHOLD_PCT, RELEASE_TOKEN
+from intervene_enc.inference import predict
 
 # ---------------------------------------------------------------------------
 # Fixed evaluation constants (do not change)
@@ -419,7 +419,7 @@ def evaluate_on_test_set(model, tokenizer, test_temporal_raw, test_ctx_raw,
              patient-level AUROC/AUPRC/F1, length-of-stay MAE, time-head MAE.
 
     Args:
-        model:             Trained EMREncoder with task heads attached.
+        model:             Trained InterveneEncoder with task heads attached.
         tokenizer:         EMRTokenizer fitted on training data.
         test_temporal_raw: Raw test temporal events.
         test_ctx_raw:      Raw test context features.
@@ -553,7 +553,7 @@ def bootstrap_evaluate(model, tokenizer, test_temporal_raw, test_ctx_raw,
              far cheaper than re-seeding the full pipeline.
 
     Args:
-        model               : trained EMREncoder with task heads attached.
+        model               : trained InterveneEncoder with task heads attached.
         tokenizer           : EMRTokenizer matching the training vocab.
         test_temporal_raw   : held-out test split temporal DataFrame.
         test_ctx_raw        : held-out test split context DataFrame.
@@ -569,7 +569,7 @@ def bootstrap_evaluate(model, tokenizer, test_temporal_raw, test_ctx_raw,
         grep-friendly summary block.
     """
     import time
-    from transform_emr.config.dataset_config import DEATH_TOKEN
+    from intervene_enc.config.dataset_config import DEATH_TOKEN
 
     res = evaluate_on_test_set(
         model=model, tokenizer=tokenizer,

@@ -12,8 +12,8 @@ from collections import Counter
 from typing import List
 
 # ───────── local code ─────────────────────────────────────────────────── #
-from transform_emr.config.dataset_config import *
-from transform_emr.config.model_config import CHECKPOINT_PATH
+from intervene_enc.config.dataset_config import *
+from intervene_enc.config.model_config import CHECKPOINT_PATH
 
 
 class DataProcessor:
@@ -32,7 +32,7 @@ class DataProcessor:
 
     """
     def __init__(self, df, context_df, 
-                 tak_repo_path='transform_emr/config/tak_repo.pkl', 
+                 tak_repo_path='intervene_enc/config/tak_repo.pkl', 
                  max_input_days=None, 
                  scaler=None, 
                  checkpoint_path=CHECKPOINT_PATH,
@@ -563,9 +563,9 @@ class DataProcessor:
         #      for the model to learn meaningful temporal dependencies.
         #
         # If you need to change this sorting for any reason, you MUST also update:
-        #   - transform_emr/utils.py::get_temporal_multi_hot_targets()
-        #   - transform_emr/embedder.py::train_embedder() BCE loss computation
-        #   - transform_emr/transformer.py::pretrain_transformer() BCE loss computation
+        #   - intervene_enc/utils.py::get_temporal_multi_hot_targets()
+        #   - intervene_enc/embedder.py::train_embedder() BCE loss computation
+        #   - intervene_enc/transformer.py::pretrain_transformer() BCE loss computation
         #
         self.df = df.sort_values(['PatientId', 'TimePoint']).reset_index(drop=True)
     

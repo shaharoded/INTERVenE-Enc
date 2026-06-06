@@ -21,13 +21,13 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from transform_emr.dataset import EMRDataset, collate_emr
-from transform_emr.transformer import EMREncoder
-from transform_emr.config.dataset_config import RELEASE_TOKEN, DEATH_TOKEN
+from intervene_enc.dataset import EMRDataset, collate_emr
+from intervene_enc.transformer import InterveneEncoder
+from intervene_enc.config.dataset_config import RELEASE_TOKEN, DEATH_TOKEN
 
 
 @torch.no_grad()
-def predict(model: EMREncoder, dataset: EMRDataset, batch_size: int = 16,
+def predict(model: InterveneEncoder, dataset: EMRDataset, batch_size: int = 16,
             num_workers: int = 0, device: Optional[torch.device] = None) -> pd.DataFrame:
     """
     Purpose: Run the encoder + task heads on every patient and return a tidy
@@ -39,7 +39,7 @@ def predict(model: EMREncoder, dataset: EMRDataset, batch_size: int = 16,
              present in ``T_*`` as the length-of-stay regression.
 
     Args:
-        model       (EMREncoder): Phase-3 (or later) trained model with
+        model       (InterveneEncoder): Phase-3 (or later) trained model with
                                   task heads attached.
         dataset     (EMRDataset): pre-truncated input dataset.
         batch_size  (int):        loader batch size.
@@ -53,7 +53,7 @@ def predict(model: EMREncoder, dataset: EMRDataset, batch_size: int = 16,
     """
     if model.task_heads is None:
         raise RuntimeError(
-            "[inference.predict] EMREncoder has no task_heads attached. "
+            "[inference.predict] InterveneEncoder has no task_heads attached. "
             "Load a Phase-3 checkpoint or call model.attach_task_heads()."
         )
 

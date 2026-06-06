@@ -5,11 +5,11 @@
 A bidirectional BERT-style transformer for **outcome prediction from temporal
 interval EMR data**. Three phases:
 
-1. **Phase 1 — `EMREmbedding`** (`transform_emr/embedder.py`). Hierarchical
+1. **Phase 1 — `EMREmbedding`** (`intervene_enc/embedder.py`). Hierarchical
    token embeddings (raw → concept → concept+value → position), Time2Vec for
    absolute timestamps, static patient context added as AdaLN-Zero bias. Loss:
    per-window outcome BCE + Δt MSE auxiliary.
-2. **Phase 2 — `EMREncoder`** (`transform_emr/transformer.py`). 4-layer
+2. **Phase 2 — `InterveneEncoder`** (`intervene_enc/transformer.py`). 4-layer
    bidirectional transformer with AdaLN-Zero patient conditioning + temporal
    RoPE. MLM pre-training: full-vocab CE on masked positions (atomic-interval
    mask) + `t_pos` (time-since-admission) and `t_local` (time-to-neighbour)
@@ -51,7 +51,7 @@ reported via length-of-stay MAE.
 
 **Do not touch `api.py` or `evaluation.py`.** The fixed-driver / fixed-eval
 contract is what makes ledger rows comparable across iterations. Edits live in
-`transform_emr/**` and `transform_emr/config/*.py`.
+`intervene_enc/**` and `intervene_enc/config/*.py`.
 
 ---
 
@@ -143,7 +143,7 @@ rm -rf checkpoints/phase1
 
 ## Useful diagnostics
 
-`transform_emr.diagnose.run_diagnostics(model, val_dl)` runs the full sweep:
+`intervene_enc.diagnose.run_diagnostics(model, val_dl)` runs the full sweep:
 MLM top-1/top-5 accuracy, time-aux residual percentiles, pool attention
 entropy per outcome, risk-logit distributions, legality starvation. **Call
 this after every architecture change** to catch silent collapse before

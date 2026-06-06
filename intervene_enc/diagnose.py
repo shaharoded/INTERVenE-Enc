@@ -2,7 +2,7 @@
 diagnose.py
 ===========
 
-Post-training health checks for the BERT-pivot ``EMREncoder``.
+Post-training health checks for the BERT-pivot ``InterveneEncoder``.
 
 All probes consume a trained model + a validation DataLoader and print a short
 report; nothing here mutates the model.  Helpful when investigating why a
@@ -48,8 +48,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from transform_emr.transformer import EMREncoder
-from transform_emr.utils import apply_mlm_mask, build_luts
+from intervene_enc.transformer import InterveneEncoder
+from intervene_enc.utils import apply_mlm_mask, build_luts
 
 
 # ───────── helpers ────────────────────────────────────────────────────── #
@@ -74,7 +74,7 @@ def _percentiles(values: np.ndarray, qs=(5, 25, 50, 75, 95)) -> str:
 
 # ───────── MLM accuracy ──────────────────────────────────────────────── #
 @torch.no_grad()
-def probe_mlm_accuracy(model: EMREncoder, loader, n_batches: int = 2,
+def probe_mlm_accuracy(model: InterveneEncoder, loader, n_batches: int = 2,
                        p: float = 0.15,
                        top_k: int = 5) -> dict:
     """
@@ -146,7 +146,7 @@ def probe_mlm_accuracy(model: EMREncoder, loader, n_batches: int = 2,
 
 # ───────── time aux residuals ─────────────────────────────────────────── #
 @torch.no_grad()
-def probe_time_aux_residuals(model: EMREncoder, loader, n_batches: int = 2,
+def probe_time_aux_residuals(model: InterveneEncoder, loader, n_batches: int = 2,
                              p: float = 0.15) -> dict:
     """
     Purpose: Distribution of t_pos and t_local residuals on val batches.
@@ -158,7 +158,7 @@ def probe_time_aux_residuals(model: EMREncoder, loader, n_batches: int = 2,
     Returns:
         dict with per-aux ``mean``, ``std`` and percentile string.
     """
-    from transform_emr.utils import time_to_neighbour_targets
+    from intervene_enc.utils import time_to_neighbour_targets
 
     model.eval()
     device = next(model.parameters()).device
@@ -218,7 +218,7 @@ def probe_time_aux_residuals(model: EMREncoder, loader, n_batches: int = 2,
 
 # ───────── pool attention diagnostics ─────────────────────────────────── #
 @torch.no_grad()
-def probe_pool_attention(model: EMREncoder, loader, n_batches: int = 2) -> dict:
+def probe_pool_attention(model: InterveneEncoder, loader, n_batches: int = 2) -> dict:
     """
     Purpose: Inspect the per-outcome attention pool.
     Method:  Re-run the pool with ``need_weights=True`` on a few batches and
@@ -271,7 +271,7 @@ def probe_pool_attention(model: EMREncoder, loader, n_batches: int = 2) -> dict:
 
 # ───────── outcome logit distribution ─────────────────────────────────── #
 @torch.no_grad()
-def probe_outcome_logit_distribution(model: EMREncoder, loader,
+def probe_outcome_logit_distribution(model: InterveneEncoder, loader,
                                      n_batches: int = 2) -> dict:
     """
     Purpose: Risk-head logit distribution per outcome.
@@ -312,7 +312,7 @@ def probe_outcome_logit_distribution(model: EMREncoder, loader,
 
 # ───────── legality starvation ────────────────────────────────────────── #
 @torch.no_grad()
-def probe_legality_starvation(model: EMREncoder, loader, n_batches: int = 2,
+def probe_legality_starvation(model: InterveneEncoder, loader, n_batches: int = 2,
                               p: float = 0.15,
                               ks=(1, 5, 20)) -> dict:
     """
@@ -359,7 +359,7 @@ def probe_legality_starvation(model: EMREncoder, loader, n_batches: int = 2,
 
 
 # ───────── one-shot wrapper ───────────────────────────────────────────── #
-def run_diagnostics(model: EMREncoder, loader, n_batches: int = 2,
+def run_diagnostics(model: InterveneEncoder, loader, n_batches: int = 2,
                     p: float = 0.15) -> dict:
     """
     Purpose: Run the standard suite of BERT-encoder health checks and return
@@ -369,7 +369,7 @@ def run_diagnostics(model: EMREncoder, loader, n_batches: int = 2,
              outcome-head / pool probes self-skip in that case.
 
     Args:
-        model     : trained EMREncoder.
+        model     : trained InterveneEncoder.
         loader    : validation DataLoader.
         n_batches : how many batches to sample per probe.
         p         : MLM ratio to re-apply for the MLM / time-aux / legality probes.

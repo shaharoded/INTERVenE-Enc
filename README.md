@@ -27,13 +27,13 @@ evaluation.py                fixed: single-pass eval + bootstrap CIs (patient AU
 program.md                   model overview + eval contract + loop discipline (methodology)
 README.md                    this file — usage + ops
 
-transform_emr/
+intervene_enc/
   config/
     model_config.py          MODEL_CONFIG + TRAINING_SETTINGS (the things you edit)
     dataset_config.py        paths, tokens, USE_QA_DATA flag
     tak-repo-portable.json   knowledge-base hierarchy (TAK / KB intervals)
   embedder.py                Phase-1 EMREmbedding + train_embedder
-  transformer.py             Phase-2/3 EMREncoder + TaskHeads + pretrain/finetune
+  transformer.py             Phase-2/3 InterveneEncoder + TaskHeads + pretrain/finetune
   inference.py               single-pass predict()
   dataset.py                 DataProcessor, EMRTokenizer, dataloaders
   diagnose.py                run_diagnostics — MLM/pool/time-aux probes
@@ -54,7 +54,7 @@ checkpoints_export/          local mirror of deliverable weights  (gitignored)
 
 `api.py` and `evaluation.py` are the fixed contract — they define the
 training pipeline and the metrics that every ledger row is comparable against.
-Edits live under `transform_emr/` (primarily `config/model_config.py`).
+Edits live under `intervene_enc/` (primarily `config/model_config.py`).
 
 ---
 
@@ -91,7 +91,7 @@ python api.py --diagnose --sample 10000 > results/logs/diag.log 2>&1
 metrics are emitted as grep-friendly TSV rows (`patient_per_outcome\t…`,
 `time_head_mae_hrs\t…`).
 
-**Tuning the recipe.** Edit `transform_emr/config/model_config.py` and re-run
+**Tuning the recipe.** Edit `intervene_enc/config/model_config.py` and re-run
 `python api.py`. The Phase-1 embedder is reused automatically when
 `(embed_dim, time2vec_dim, ctx_dim)` is unchanged — set a different value to
 force a Phase-1 retrain. Tokenizer-affecting changes (`USE_QA_DATA` toggle)
