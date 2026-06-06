@@ -279,25 +279,38 @@ def length_of_stay_mae(predictions, gt_episodes, release_token=RELEASE_TOKEN,
               "lift_hours": float("nan")}
     if tcol not in predictions.columns:
         return dict(_empty)
-    errs, gts, preds = [], [], []
+    errs, gts, preds, forecast_gts = [], [], [], []
     for pid in predictions.index:
         gt_releases = gt_episodes.get(pid, {}).get(release_token, [])
         if not gt_releases:
             continue
         gt_los = float(min(gt_releases))
-        if gt_los <= forecast_cutoff_hours:
-            continue  # release within input window — context, not a forecast
         pred_los = float(predictions.loc[pid, tcol])
         errs.append(abs(pred_los - gt_los))
         gts.append(gt_los)
         preds.append(pred_los)
+        # Baseline cohort: releases that occur AFTER the input window
+        # (releases inside the window were given to the encoder as context).
+        if gt_los > forecast_cutoff_hours:
+            forecast_gts.append(gt_los)
     if not errs:
         return dict(_empty)
-    arr      = np.asarray(errs)
-    gts_arr  = np.asarray(gts)
-    mae      = float(arr.mean())
-    gt_median = float(np.median(gts_arr))
-    baseline = float(np.mean(np.abs(gts_arr - gt_median)))   # MAE-optimal constant predictor
+    arr  = np.asarray(errs)
+    mae  = float(arr.mean())
+    # Baseline (MAE-optimal constant predictor) is computed on releases that
+    # occur AFTER the input window — the forecasting-only cohort. Almost all
+    # releases are well beyond 48 h (median ~146 h) so this is a near-no-op
+    # in practice, but it keeps the baseline semantics aligned with
+    # `time_head_mae`.
+    if forecast_gts:
+        fc_arr    = np.asarray(forecast_gts)
+        gt_median = float(np.median(fc_arr))
+        baseline  = float(np.mean(np.abs(fc_arr - gt_median)))
+        lift      = baseline - mae
+    else:
+        gt_median = float("nan")
+        baseline  = float("nan")
+        lift      = float("nan")
     return {
         "mae_hours":          mae,
         "median_hours":       float(np.median(arr)),
@@ -307,71 +320,87 @@ def length_of_stay_mae(predictions, gt_episodes, release_token=RELEASE_TOKEN,
         "pred_mean_hours":    float(np.mean(preds)),
         "baseline_mae_hours": baseline,
         "gt_median_hours":    gt_median,
-        "lift_hours":         baseline - mae,
+        "lift_hours":         lift,
     }
 
 
 def time_head_mae(predictions, gt_episodes, outcome_names,
                   forecast_cutoff_hours=FORECAST_CUTOFF_HOURS):
     """
-    Purpose: Per-outcome time-head MAE on the FORECASTING cohort (events that
-             occur AFTER the encoder's input window — events inside the window
-             are in the encoder's input and are not a forecasting task), plus
-             the constant-predictor baseline so the lift is explicit (and the
-             agent can tell whether the time head is genuinely learning timing
-             beyond a constant).
-    Method:  For each (patient, outcome) where the outcome occurred in GT
-             beyond ``forecast_cutoff_hours``:
-               - take the GT episode(s) of that outcome occurring after the
-                 cutoff, pick the one nearest the model's prediction, score
-                 ``|pred − nearest_gt|`` (matches the patient-level rule).
-             Baseline = MAE of the MAE-optimal constant predictor (the GT
-             median over the same forecasting cohort) = mean |GT − median|.
+    Purpose: Per-outcome time-head MAE alongside the MAE-optimal
+             constant-predictor baseline, so the agent can tell whether the
+             time head is genuinely learning timing beyond a constant.
+    Method:  - Model MAE: scored over every positive patient (the model's
+             T_<outcome> is a forecast it makes for every positive; whether
+             the matched GT event happens to be inside or outside the input
+             window doesn't change what the model output). For each positive
+             patient: pick the GT episode nearest the model's prediction
+             and score ``|pred − nearest_gt|``.
+             - Baseline (constant-median predictor): computed over the
+             FORECASTING cohort only — GT events occurring AFTER
+             ``forecast_cutoff_hours``. Events inside the input window were
+             given to the encoder as context and aren't part of the
+             forecasting task that a constant predictor should be
+             benchmarked against. Baseline MAE = mean |GT − median(GT)| over
+             the >cutoff GT episodes.
 
     Returns:
         pd.DataFrame indexed by outcome, columns:
-            mae_hours          — model MAE on the forecasting cohort.
-            n_patients         — # patients with at least one >cutoff event.
-            gt_median_hours    — median GT time-to-event (forecasting cohort).
-            baseline_mae_hours — MAE of the constant=median predictor (floor).
-            lift_hours         — baseline_mae − mae (positive ⇒ model beats
-                                 the constant predictor; ≤ 0 ⇒ no temporal
-                                 signal learned beyond a constant).
+            mae_hours              — model MAE on all positives.
+            n_patients             — # positive patients (model MAE cohort).
+            n_forecasting          — # positives with at least one >cutoff event.
+            gt_median_hours        — median GT time over the forecasting cohort.
+            baseline_mae_hours     — MAE of the constant=median predictor
+                                     over the forecasting cohort.
+            lift_hours             — baseline_mae − model_mae (positive ⇒
+                                     model beats the forecast-only constant
+                                     predictor; ≤ 0 ⇒ no useful time signal).
     """
     rows = []
     for name in outcome_names:
         tcol = f"T_{name}"
         if tcol not in predictions.columns:
             continue
-        errs, gts = [], []
+        # ── Model MAE: nearest GT over ALL the patient's GT episodes. ──────
+        errs, forecast_gts = [], []
         for pid in predictions.index:
             episodes = gt_episodes.get(pid, {}).get(name, [])
-            # Forecasting cohort: only GT episodes beyond the input window.
-            episodes_f = [t for t in episodes if t > forecast_cutoff_hours]
-            if not episodes_f:
+            if not episodes:
                 continue
             pred_t = float(predictions.loc[pid, tcol])
-            nearest_gt = min(episodes_f, key=lambda t: abs(pred_t - t))
+            nearest_gt = min(episodes, key=lambda t: abs(pred_t - t))
             errs.append(abs(pred_t - nearest_gt))
-            gts.append(float(nearest_gt))
+            # Also collect the first forecasting-cohort event (if any) so the
+            # baseline below can be computed on the same eval pass.
+            forecast_only = [t for t in episodes if t > forecast_cutoff_hours]
+            if forecast_only:
+                forecast_gts.append(float(min(forecast_only)))
         if not errs:
             rows.append({"outcome": name, "mae_hours": float("nan"),
-                         "n_patients": 0,
+                         "n_patients": 0, "n_forecasting": 0,
                          "gt_median_hours": float("nan"),
                          "baseline_mae_hours": float("nan"),
                          "lift_hours": float("nan")})
             continue
-        gts_arr   = np.asarray(gts)
-        gt_median = float(np.median(gts_arr))
-        baseline  = float(np.mean(np.abs(gts_arr - gt_median)))
-        mae       = float(np.mean(errs))
+        mae = float(np.mean(errs))
+        # ── Baseline: MAE-optimal constant predictor on the forecasting cohort. ──
+        if forecast_gts:
+            gts_arr   = np.asarray(forecast_gts)
+            gt_median = float(np.median(gts_arr))
+            baseline  = float(np.mean(np.abs(gts_arr - gt_median)))
+            lift      = baseline - mae
+        else:
+            gt_median = float("nan")
+            baseline  = float("nan")
+            lift      = float("nan")
         rows.append({
             "outcome":            name,
             "mae_hours":          mae,
             "n_patients":         len(errs),
+            "n_forecasting":      len(forecast_gts),
             "gt_median_hours":    gt_median,
             "baseline_mae_hours": baseline,
-            "lift_hours":         baseline - mae,
+            "lift_hours":         lift,
         })
     return pd.DataFrame(rows).set_index("outcome").sort_values("mae_hours")
 
@@ -469,16 +498,18 @@ def evaluate_on_test_set(model, tokenizer, test_temporal_raw, test_ctx_raw,
           f"AUPRC={patient_mean['auprc_simple']:.3f}, "
           f"n_outcomes={patient_mean['n_outcomes_used']})")
     if len(time_mae_table):
-        print("[Eval] Time-head MAE per outcome (positives only, nearest GT; "
-              "baseline = MAE of predict-GT-median; lift = baseline − model, "
-              "positive ⇒ beats constant predictor):")
+        print("[Eval] Time-head MAE per outcome — model MAE on all positives; "
+              "baseline = constant-GT-median predictor on the FORECASTING cohort "
+              "(events > input window); lift = baseline − model "
+              "(positive ⇒ beats the forecast-only constant predictor):")
         for outcome, row in time_mae_table.iterrows():
             if not np.isnan(row["mae_hours"]):
+                n_fc = int(row['n_forecasting']) if 'n_forecasting' in row.index else 0
                 print(f"  {outcome:<45} MAE={row['mae_hours']:.2f}h  "
                       f"baseline={row['baseline_mae_hours']:.2f}h  "
                       f"lift={row['lift_hours']:+.2f}h  "
                       f"gt_median={row['gt_median_hours']:.1f}h  "
-                      f"n_pos={int(row['n_patients'])}")
+                      f"n_pos={int(row['n_patients'])}  n_forecast={n_fc}")
 
     return dict(
         patient_auc_table=patient_auc_table,

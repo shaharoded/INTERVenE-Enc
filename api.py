@@ -547,9 +547,12 @@ if _pat_tbl is not None:
         print(f"patient_per_outcome\t{_outcome}\t{_auroc}\t{_auprc}\t{_maxf1}\t{_mthr}\t{_f105}\t"
               f"{int(_row['n_pos'])}\t{int(_row['n_neg'])}\t{_row['prevalence']:.6f}")
 
-# Per-outcome time-head MAE (single-pass; positives only, distance to nearest GT occurrence).
-# baseline = MAE of constant-median predictor; lift = baseline − model (positive ⇒ model > constant).
-print("time_head_mae_hrs\toutcome\tmae_hours\tbaseline_mae_hours\tlift_hours\tgt_median_hours\tn_patients")
+# Per-outcome time-head MAE (positives only, distance to nearest GT occurrence).
+# Model MAE: all positives. Baseline: MAE-optimal constant predictor (GT
+# median) over the FORECASTING cohort only — events that occur AFTER the
+# encoder's input window. lift = baseline − model (positive ⇒ model beats
+# the forecast-only constant predictor; ≤ 0 ⇒ no useful time signal).
+print("time_head_mae_hrs\toutcome\tmae_hours\tbaseline_mae_hours\tlift_hours\tgt_median_hours\tn_patients\tn_forecasting")
 _mae_tbl = eval_results.get("time_mae_table")
 if _mae_tbl is not None and len(_mae_tbl) > 0:
     for _outcome, _row in _mae_tbl.iterrows():
@@ -557,7 +560,8 @@ if _mae_tbl is not None and len(_mae_tbl) > 0:
         _base  = f"{_row['baseline_mae_hours']:.4f}" if not pd.isna(_row['baseline_mae_hours']) else "nan"
         _lift  = f"{_row['lift_hours']:.4f}"         if not pd.isna(_row['lift_hours'])         else "nan"
         _gtmed = f"{_row['gt_median_hours']:.4f}"    if not pd.isna(_row['gt_median_hours'])    else "nan"
-        print(f"time_head_mae_hrs\t{_outcome}\t{_mae}\t{_base}\t{_lift}\t{_gtmed}\t{int(_row['n_patients'])}")
+        _nfc   = int(_row['n_forecasting']) if 'n_forecasting' in _row.index and not pd.isna(_row.get('n_forecasting', np.nan)) else 0
+        print(f"time_head_mae_hrs\t{_outcome}\t{_mae}\t{_base}\t{_lift}\t{_gtmed}\t{int(_row['n_patients'])}\t{_nfc}")
 
 print(f"phase2_best_val:  {phase2_best:.6f}")
 print(f"phase2_epochs:    {phase2_epochs}")
