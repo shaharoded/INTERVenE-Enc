@@ -1,26 +1,36 @@
-# Ignore specific files
-emr_model.zip
-
-# Ignore an entire folder
-venv/
-.venv/
-tmp-docs/
+# Python build artifacts
 __pycache__/
-checkpoints/
-transform_emr_temp/
 *.egg-info/
 .pytest_cache/
 .ipynb_checkpoints/
-docs/
-smoke.log
 
+# Virtual envs
+venv/
+.venv/
+
+# Data + checkpoints (large; never committed)
 data/
+# `/data` is the symlink target on the pod
+/data
+# working state
 checkpoints/
-# Local checkpoint backups (KEEP recovery artifacts) — never commit
-checkpoints.bak_keep_*/
 checkpoints_export/
-_pulled/
+
+# per-KEEP weight backups
+checkpoints.bak_keep_*/
+# local-only mirror of deliverable weights
+checkpoints_export/
+
+# results + logs
+results/
+
+# Tooling / scratch — regenerated or one-off, purged from history
+.claude/
 agent.bundle
 .agent_amendment.txt
-# data is an environment symlink to /workspace/autoresearch/data
-/data
+_pulled/
+
+# Misc
+emr_model.zip
+tmp-docs/
+docs/

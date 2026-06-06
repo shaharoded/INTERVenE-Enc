@@ -487,32 +487,21 @@ def apply_cbm(batch, tokenizer, forbid_ids, luts, p=0.25):
     return batch
 
 
-def apply_mlm_mask(batch, tokenizer, forbid_ids, luts, p=0.15, mode="positional"):
+def apply_mlm_mask(batch, tokenizer, forbid_ids, luts, p=0.15):
     """
     Purpose: BERT-style masked language modelling masker for the EMR encoder.
     Method:  Builds on apply_cbm — samples p% of eligible (b, t) positions and
              atomically masks both endpoints of any picked interval token via
              the precomputed partner-position table.  Unlike apply_cbm, the
-             replacement is hierarchical (preserves interval structure on the
-             input side) and the function also returns:
+             replacement preserves interval structure on the input side and
+             the function also returns:
                • target_ids — the ORIGINAL position_ids (used as MLM targets)
                • mlm_mask   — bool [B, T], True at positions to score in CE
 
-    Replacement rule (per position) depends on ``mode``:
-
-    ``mode="positional"`` (BERT-default):
-        original *_START                 → [MASK_INTERVAL_START]
-        original *_END                   → [MASK_INTERVAL_END]
-        any other maskable token         → [MASK]
-
-    ``mode="hierarchical"`` (HEART-style):
-        original *_START                 → [MASK_INTERVAL_START]
-        original *_END                   → [MASK_INTERVAL_END]
-        any other maskable token         → [MASK_RAW_<family>]
-        where <family> is the token's first sorted ParentRawConcept.  Requires
-        the tokenizer to have been built with the family mask LUT
-        (``tokenizer.tokenid2family_mask_id``); falls back to the generic
-        [MASK] when the LUT is unavailable.
+    Replacement rule (per position):
+        original *_START          → [MASK_INTERVAL_START]
+        original *_END            → [MASK_INTERVAL_END]
+        any other maskable token  → [MASK]
 
     All four hierarchical input streams (parent_raw_ids, concept_ids,
     value_ids, position_ids) are replaced with the same mask id so the
@@ -548,22 +537,12 @@ def apply_mlm_mask(batch, tokenizer, forbid_ids, luts, p=0.15, mode="positional"
     mask_int_end_tok   = tokenizer.mask_interval_end_id
     pad_id             = tokenizer.pad_token_id
 
-    # Eligible positions — same filter as apply_cbm.  Family-mask tokens are
-    # also blocked so the masker is idempotent when re-applied to a masked batch.
+    # Eligible positions — same filter as apply_cbm.
     forbid = torch.zeros(tokenizer.token_weights.numel(), dtype=torch.bool, device=device)
     forbid[pad_id] = True
     forbid[mask_tok] = True
     forbid[mask_int_start_tok] = True
     forbid[mask_int_end_tok] = True
-    fam_lut = getattr(tokenizer, "tokenid2family_mask_id", None)
-    fam_names = getattr(tokenizer, "family_mask_names", None) or []
-    if fam_names:
-        fam_ids = torch.tensor(
-            [tokenizer.token2id[n] for n in fam_names if n in tokenizer.token2id],
-            dtype=torch.long, device=device,
-        )
-        if fam_ids.numel():
-            forbid[fam_ids] = True
     forbid[forbid_ids] = True
     eligible = ~forbid[pos_ids]  # [B, T]
 
@@ -596,19 +575,9 @@ def apply_mlm_mask(batch, tokenizer, forbid_ids, luts, p=0.15, mode="positional"
     is_s_at = luts["is_start"][pos_ids]
     is_e_at = luts["is_end"][pos_ids]
 
-    # Non-interval replacement depends on `mode`.  In hierarchical mode the
-    # family LUT yields the per-token-family mask id; in positional mode it's
-    # always the generic mask token.  We compute both and select via the
-    # interval gates.
-    if mode == "hierarchical" and fam_lut is not None:
-        non_interval_repl = fam_lut.to(device)[pos_ids]
-    elif mode == "hierarchical":
-        # Family LUT unavailable on this tokenizer — fall back silently.
-        non_interval_repl = torch.full_like(pos_ids, mask_tok)
-    elif mode == "positional":
-        non_interval_repl = torch.full_like(pos_ids, mask_tok)
-    else:
-        raise ValueError(f"[apply_mlm_mask] Unknown mode='{mode}' — expected 'positional' or 'hierarchical'.")
+    # Non-interval replacement: generic [MASK]. (Hierarchical/HEART-family
+    # replacement was tested in experiment i1-hier and DISCARDED.)
+    non_interval_repl = torch.full_like(pos_ids, mask_tok)
 
     repl_pos = torch.where(
         is_s_at & mlm_mask, torch.full_like(pos_ids, mask_int_start_tok),
@@ -822,13 +791,10 @@ def build_luts(tokenizer):
     block_ids = {
         tokenizer.pad_token_id,
         tokenizer.mask_token_id,
-        # Hierarchical MLM mask tokens — never valid prediction targets.
+        # Interval mask tokens — never valid prediction targets.
         getattr(tokenizer, "mask_interval_start_id", None),
         getattr(tokenizer, "mask_interval_end_id", None),
     }
-    # Family-mask tokens (HEART-style) — also never legitimate predictions.
-    for _n in (getattr(tokenizer, "family_mask_names", None) or []):
-        block_ids.add(tokenizer.token2id.get(_n))
     block_ids = [tid for tid in block_ids if tid is not None]
 
     predict_block = torch.zeros(V, dtype=torch.bool, device=device)
@@ -1588,3 +1554,113 @@ def get_temporal_multi_hot_targets(
             multi_hot[bi, qi, tok] = 1.0   # replace with 1-hot
 
     return multi_hot
+
+
+# ---------------------------------------------------------------------------
+# Tensor helpers shared by the Phase-2 / Phase-3 training loops + diagnose
+# ---------------------------------------------------------------------------
+
+def time_to_neighbour_targets(abs_ts, pad_mask, mlm_mask, max_hours=24.0):
+    """
+    Purpose: Build per-position local-gap targets for the time_to_neighbour aux.
+    Method:  For each masked position, gap = min(t − t_prev_unmasked,
+             t_next_unmasked − t). Distances computed over normalised abs_ts
+             (hours / 336) and rescaled to hours / max_hours so the regression
+             target sits roughly in [0, 1].
+
+             Fully vectorised: ``cummax`` of (t · unmasked) gives the most
+             recent unmasked time to the left of every position; reversed
+             ``cummin`` gives the nearest unmasked time to the right.
+
+    Args:
+        abs_ts    (FloatTensor): [B, T] normalised abs timestamps (t / 336 h).
+        pad_mask  (BoolTensor):  [B, T] True at non-PAD positions.
+        mlm_mask  (BoolTensor):  [B, T] True at MLM-masked positions.
+        max_hours (float):       rescale denominator.
+
+    Returns:
+        target  (FloatTensor): [B, T] local gap normalised to [0, ~1].
+        valid   (BoolTensor):  [B, T] positions that contribute to the loss
+                              (masked, non-PAD, with at least one unmasked
+                              neighbour in the sequence).
+    """
+    unmasked = pad_mask & (~mlm_mask)
+    inf = abs_ts.new_full(abs_ts.shape, float("inf"))
+
+    # left-most reachable t (most recent unmasked time ≤ i) via cummax
+    t_left = torch.where(unmasked, abs_ts, -inf)
+    t_left = torch.cummax(t_left, dim=1).values
+
+    # right-most reachable t (nearest unmasked time ≥ i) via reversed cummin
+    t_right_full = torch.where(unmasked, abs_ts, inf)
+    t_right = torch.cummin(t_right_full.flip(1), dim=1).values.flip(1)
+
+    # normalised-time gaps → hours → fraction of `max_hours`
+    left_gap_hours  = (abs_ts - t_left) * 336.0
+    right_gap_hours = (t_right - abs_ts) * 336.0
+
+    has_left  = (t_left  > -float("inf"))
+    has_right = (t_right <  float("inf"))
+
+    only_left  = has_left & (~has_right)
+    only_right = has_right & (~has_left)
+
+    gap_hours = torch.where(only_left,  left_gap_hours,
+                  torch.where(only_right, right_gap_hours,
+                  torch.minimum(left_gap_hours, right_gap_hours)))
+    gap_hours = gap_hours.clamp_min(0.0)
+
+    valid  = pad_mask & mlm_mask & (has_left | has_right)
+    target = (gap_hours / max_hours).clamp(0.0, 5.0)
+    return target, valid
+
+
+def build_patient_labels(model, batch, training_settings, device):
+    """
+    Purpose: Build patient-level risk labels and per-outcome time targets for
+             the Phase-3 fine-tune loss.
+    Method:  For each outcome k, label[b, k] = 1 iff the outcome appears
+             anywhere in the GT trajectory of patient b. gt_time[b, k] is the
+             first occurrence in hours from sequence start, clamped to the
+             training horizon. Both come straight from ``position_ids`` /
+             ``abs_ts`` — no extra collate needed.
+
+    Args:
+        model              : EMREncoder (uses ``outcome_names`` and the
+                             tokenizer for the outcome → token-id mapping).
+        batch              : dict with ``position_ids`` [B, T] and ``abs_ts``
+                             [B, T] (normalised by 336 h).
+        training_settings  : config — uses ``outcome_horizon_hours_p3`` for
+                             the label clip (default 336 h).
+        device             : torch device.
+
+    Returns:
+        labels   (FloatTensor): [B, K] {0., 1.} multi-label outcome flags.
+        gt_time  (FloatTensor): [B, K] hours from seq start to first
+                                occurrence (filled with 0.0 where label==0).
+        present  (BoolTensor):  [B, K] True iff outcome present.
+    """
+    tok = model.embedder.tokenizer
+    outcome_ids = torch.tensor(
+        [tok.token2id[n] for n in model.outcome_names], dtype=torch.long, device=device,
+    )                                                              # [K]
+    K = outcome_ids.numel()
+
+    pos_ids = batch["position_ids"]                                # [B, T]
+    abs_ts  = batch["abs_ts"]                                      # [B, T] normalised
+    pad_mask = pos_ids != tok.pad_token_id                          # [B, T]
+
+    # match[b, t, k] = 1 iff position (b, t) is the k-th outcome token, non-pad.
+    match = (pos_ids.unsqueeze(-1) == outcome_ids.view(1, 1, K)) & pad_mask.unsqueeze(-1)
+    present = match.any(dim=1)                                     # [B, K]
+    labels  = present.float()
+
+    # First occurrence time per (b, k): mask non-matches with +inf, then min.
+    t_hours = abs_ts.unsqueeze(-1) * 336.0                          # [B, T, 1]
+    huge = torch.full_like(t_hours, float("inf"))
+    t_masked = torch.where(match, t_hours, huge)
+    first_t, _ = t_masked.min(dim=1)                                # [B, K]
+    horizon = float(training_settings.get("outcome_horizon_hours_p3", 336.0))
+    gt_time = torch.where(present, first_t.clamp(0.0, horizon), torch.zeros_like(first_t))
+
+    return labels, gt_time, present

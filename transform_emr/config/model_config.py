@@ -10,8 +10,7 @@ PHASE2_CHECKPOINT = os.path.join(CHECKPOINT_PATH, 'phase2', 'ckpt_best.pt')
 PHASE3_CHECKPOINT = os.path.join(CHECKPOINT_PATH, 'phase3', 'ckpt_best.pt')
 
 # Global RNG seed — applied via utils.set_seed() in every model constructor and
-# training-phase entry point so runs are reproducible (removes the init/training-
-# stochasticity confound). Vary this for the multi-seed confidence study (Step 5).
+# training-phase entry point so runs are reproducible.
 SEED = 42
 
 MODEL_CONFIG = {
@@ -27,7 +26,7 @@ TRAINING_SETTINGS = {
     "phase1_n_epochs": 100,
     "phase2_n_epochs": 100,
     "phase3_n_epochs": 100,
-    "sample": None,  # Smoke: 50 + epochs 1.  Phase-1 probe: 10000.  Phase-2 confirm: None (full data).
+    "sample": None,  # For smoke tests.
 
     # Phase-2 optimizer LR warmup (OneCycleLR pct_start).
     # This controls optimizer step size ramp-up, not auxiliary-loss lambda warmup.
@@ -35,15 +34,15 @@ TRAINING_SETTINGS = {
     "early-stop-patience": 5,
     "early-stop-min-delta-rel": 1e-3,  # relative improvement threshold (0.1%)
 
-    "phase1_learning_rate": 3e-4,
-    "phase2_learning_rate": 3e-4,
+    "phase1_learning_rate":       3e-4,
+    "phase2_learning_rate":       3e-4,
     "phase3_learning_rate":       1e-4,
     "phase3_backbone_lr_factor":  0.01,  # backbone LR = phase3_lr * factor (1e-6); 0.0 = fully frozen
     "phase3_weight_decay":        1e-3,  # weight decay for outcome_head in P3 (matches backbone)
-    "weight_decay": 1e-3,
+    "weight_decay":               1e-3,
 
     "batch_size": 16, # Number of patients processed concurrently (effective batch=64 via grad accumulation)
-    "grad_accumulation_steps": 4, # Accumulate gradients over N steps before optimizer.step()
+    "grad_accumulation_steps": 4, # Accumulate gradients over N steps before optimizer.step(), memory-friendly way to get effective batch size > GPU batch size.
     "phase1_bce_window_hours": 3.0,
     # Soft-kernel horizon for the Phase-2 LM-head BCE. The kernel decay constant
     # tau is learnable per token class (model.log_tau_lm); this value is both the
@@ -110,16 +109,12 @@ TRAINING_SETTINGS = {
     # coarseness.
     "phase3_pool_fraction_cap": 0.05,   # I2 P4-tight: lowered 0.20 -> 0.05
 
-    # --- BERT-pivot Phase-2 settings ---
-    # MLM ratio applied per batch (BERT-default 15%; ramped from 0 over
-    # main_only_epochs).
+    # --- BERT-style Phase-2 settings ---
+    # MLM ratio applied per batch (BERT-default 15%; ramped from 0 over main_only_epochs).
     "phase2_mlm_ratio": 0.15,
-    # Atomic-interval mask replacement strategy.
-    #   "positional"   — three generic tokens ([MASK], [MASK_INTERVAL_START/END]).
-    #   "hierarchical" — per-family [MASK_RAW_<family>] for non-interval tokens
-    #                    so the encoder still sees which raw concept was masked.
-    #                    Tokenizer auto-emits the family specials at build time.
-    "phase2_mlm_mask_mode": "positional",
+    # Atomic-interval mask replacement: three generic tokens
+    # ([MASK], [MASK_INTERVAL_START/END]); hierarchical/HEART-family masking
+    # was tested (i1-hier) and DISCARDED — removed from the codebase.
     # Phase-2 aux-loss fraction caps live inside `phase2_scheduler`
     # ("aux_fraction_caps": {"t_pos": …, "t_local": …}) — see above.
 

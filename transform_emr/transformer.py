@@ -36,10 +36,11 @@ from tqdm.auto import tqdm
 from transform_emr.embedder import EMREmbedding
 from transform_emr.config.model_config import *
 from transform_emr.config.dataset_config import (
-    OUTCOMES, TERMINAL_OUTCOMES, RELEASE_TOKEN, DEATH_TOKEN,
+    OUTCOMES, TERMINAL_OUTCOMES, RELEASE_TOKEN,
 )
 from transform_emr.utils import (
     set_seed, build_luts, apply_mlm_mask, logger, plot_losses,
+    time_to_neighbour_targets, build_patient_labels,
 )
 from transform_emr.schedulers import LambdaScheduleController, LRScheduleController
 
@@ -406,11 +407,11 @@ class EMREncoder(nn.Module):
         K = self.num_outcomes
         all_idx = torch.arange(K, dtype=torch.long)
         if self._release_idx >= 0:
-            _risk = [i for i in range(K) if i != self._release_idx]
-            # Guard: a RELEASE-only outcome set (e.g. the LoS-focused single-target
-            # model) would leave the risk head with zero targets and a NaN BCE.
-            # Keep RELEASE in the risk head when it is the sole outcome.
-            risk_idx = (torch.tensor(_risk, dtype=torch.long) if _risk else all_idx.clone())
+            # Drop RELEASE from the risk head — P(RELEASE) = 1 − P(DEATH)
+            # in this cohort; LoS is reported via the RELEASE time-head.
+            risk_idx = torch.tensor(
+                [i for i in range(K) if i != self._release_idx], dtype=torch.long,
+            )
         else:
             risk_idx = all_idx.clone()
         time_idx = all_idx
@@ -686,76 +687,6 @@ class EMREncoder(nn.Module):
 
 
 # ───────── Phase-2 training: MLM + time auxiliaries ─────────────────── #
-def _time_to_neighbour_targets(abs_ts, pad_mask, mlm_mask, max_hours=24.0):
-    """
-    Purpose: Build per-position local-gap targets for the time_to_neighbour aux.
-    Method:  For each masked position, gap = min(t - t_prev_unmasked,
-             t_next_unmasked - t). Distances computed over normalised abs_ts
-             (hours/336) and rescaled to hours/max_hours so the regression
-             target sits roughly in [0, 1].
-
-             Implementation is fully vectorised: cummax of (t * unmasked) gives
-             the most recent unmasked time to the left of every position; a
-             reversed cummax does the same for the right side.
-
-    Args:
-        abs_ts    (FloatTensor): [B, T] normalised abs timestamps (t/336h).
-        pad_mask  (BoolTensor):  [B, T] True at non-PAD positions.
-        mlm_mask  (BoolTensor):  [B, T] True at MLM-masked positions.
-        max_hours (float): rescale denominator.
-
-    Returns:
-        target  (FloatTensor): [B, T] local gap normalised to [0, ~1].
-        valid   (BoolTensor):  [B, T] positions that contribute to the loss
-                              (masked, non-PAD, with at least one unmasked
-                              neighbour in the sequence).
-    """
-    B, T = abs_ts.shape
-    device = abs_ts.device
-
-    unmasked = pad_mask & (~mlm_mask)            # [B, T]
-    # Sentinel: -inf to the left, +inf to the right so the cummax / -cummax
-    # idiom on positions without any unmasked neighbour yields the sentinel
-    # rather than a valid time — those positions are filtered out via `valid`.
-    big = abs_ts.new_full((B, T), 0.0)
-    inf = abs_ts.new_full((B, T), float("inf"))
-
-    # left-most reachable t at every position (most recent unmasked time ≤ i)
-    t_left = torch.where(unmasked, abs_ts, -inf)
-    t_left = torch.cummax(t_left, dim=1).values         # [B, T]
-
-    # right-most reachable t (nearest unmasked time ≥ i) via reverse cummax
-    t_right_rev = torch.where(unmasked.flip(1), abs_ts.flip(1), -inf)
-    t_right_rev = torch.cummax(t_right_rev, dim=1).values
-    t_right = -t_right_rev.flip(1) * 0.0 + 0.0  # placeholder, replaced below
-    # The above is a no-op placeholder kept clear; we now redo with min:
-    t_right_full = torch.where(unmasked, abs_ts, inf)
-    # cummin via -cummax(-x): cheaper than torch.cummin which exists since 1.13;
-    # use cummin directly for clarity.
-    t_right = torch.cummin(t_right_full.flip(1), dim=1).values.flip(1)
-
-    # Convert normalised-time gaps to hours, then to fraction of `max_hours`.
-    left_gap_hours  = (abs_ts - t_left) * 336.0
-    right_gap_hours = (t_right - abs_ts) * 336.0
-
-    has_left  = (t_left  > -float("inf"))
-    has_right = (t_right <  float("inf"))
-
-    # If only one side exists, use it; otherwise take the smaller gap.
-    only_left  = has_left & (~has_right)
-    only_right = has_right & (~has_left)
-    both       = has_left & has_right
-
-    gap_hours = torch.where(only_left,  left_gap_hours,
-                  torch.where(only_right, right_gap_hours,
-                  torch.minimum(left_gap_hours, right_gap_hours)))
-    gap_hours = gap_hours.clamp_min(0.0)
-
-    valid = pad_mask & mlm_mask & (has_left | has_right)
-    target = (gap_hours / max_hours).clamp(0.0, 5.0)
-    return target, valid
-
-
 @logger
 def pretrain_transformer(model, train_dl, val_dl, resume=True,
                          checkpoint_path=PHASE2_CHECKPOINT,
@@ -811,9 +742,8 @@ def pretrain_transformer(model, train_dl, val_dl, resume=True,
 
     # MLM ratio ramp from 0 → phase2_mlm_ratio over the main-only window, then steady.
     mlm_p_max = training_settings.get("phase2_mlm_ratio", 0.15)
-    mlm_mode = training_settings.get("phase2_mlm_mask_mode", "positional")
     cbm_ramp_epochs = training_settings["phase2_scheduler"]["main_only_epochs"]
-    print(f"[Phase-2] MLM mask mode = {mlm_mode!r}, ratio target = {mlm_p_max}")
+    print(f"[Phase-2] MLM ratio target = {mlm_p_max}")
 
     start_epoch = 0
     best_val = float("inf")
@@ -877,7 +807,6 @@ def pretrain_transformer(model, train_dl, val_dl, resume=True,
                     forbid_ids=luts["forbid_mask_ids"],
                     luts=luts,
                     p=p_now,
-                    mode=mlm_mode,
                 )
 
                 with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
@@ -914,7 +843,7 @@ def pretrain_transformer(model, train_dl, val_dl, resume=True,
                     t_pos_raw = lm_logits.sum() * 0.0
 
                 # ---------- Aux 2: time-to-neighbour (masked only) ----------
-                t_local_target, tloc_valid = _time_to_neighbour_targets(
+                t_local_target, tloc_valid = time_to_neighbour_targets(
                     batch["abs_ts"], pad_mask, mlm_mask, max_hours=24.0,
                 )
                 if tloc_valid.any():
@@ -1007,57 +936,6 @@ def pretrain_transformer(model, train_dl, val_dl, resume=True,
 
 
 # ───────── Phase-3 training: per-outcome risk + time ─────────────────── #
-def _build_patient_labels(model, batch, training_settings, device):
-    """
-    Purpose: Build patient-level risk labels and per-outcome time targets.
-    Method:  For each outcome k, label[b, k] = 1 iff the outcome appears
-             anywhere in the GT trajectory of patient b.  gt_time[b, k] is the
-             first occurrence in hours from sequence start (clamped to the
-             training horizon).  Both are computed straight from the
-             ``position_ids`` / ``abs_ts`` tensors so no extra collate is
-             needed — the encoder's batch already carries what we need.
-
-    Args:
-        model              : EMREncoder (uses outcome_names / token2id).
-        batch              : dict with position_ids [B, T] and abs_ts [B, T].
-        training_settings  : config — uses ``outcome_horizon_hours`` for the
-                             label clip (336 h is the dataset horizon).
-        device             : torch device.
-
-    Returns:
-        labels   (FloatTensor): [B, K] {0., 1.} multi-label outcome flags.
-        gt_time  (FloatTensor): [B, K] hours from seq start to first occurrence.
-                                Positions with label=0 are filled with 0.0
-                                (loss masks them out).
-        present  (BoolTensor):  [B, K] True iff outcome present.
-    """
-    tok = model.embedder.tokenizer
-    outcome_ids = torch.tensor(
-        [tok.token2id[n] for n in model.outcome_names], dtype=torch.long, device=device,
-    )                                                              # [K]
-    K = outcome_ids.numel()
-
-    pos_ids = batch["position_ids"]                                # [B, T]
-    abs_ts  = batch["abs_ts"]                                      # [B, T] normalised
-    pad_mask = pos_ids != tok.pad_token_id                          # [B, T]
-    B, T = pos_ids.shape
-
-    # match[b, t, k] = 1 iff position (b, t) is the k-th outcome token, and non-pad.
-    match = (pos_ids.unsqueeze(-1) == outcome_ids.view(1, 1, K)) & pad_mask.unsqueeze(-1)
-    present = match.any(dim=1)                                     # [B, K]
-    labels = present.float()
-
-    # First occurrence time per (b, k): mask non-matches with +inf then argmin.
-    t_hours = abs_ts.unsqueeze(-1) * 336.0                          # [B, T, 1]
-    huge = torch.full_like(t_hours, float("inf"))
-    t_masked = torch.where(match, t_hours, huge)                    # [B, T, K]
-    first_t, _ = t_masked.min(dim=1)                                # [B, K]
-    horizon = float(training_settings.get("outcome_horizon_hours_p3", 336.0))
-    gt_time = torch.where(present, first_t.clamp(0.0, horizon), torch.zeros_like(first_t))
-
-    return labels, gt_time, present
-
-
 @logger
 def finetune_transformer(model, train_dl, val_dl, resume=True,
                          checkpoint_path=PHASE3_CHECKPOINT,
@@ -1145,7 +1023,7 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
     lambda_time = training_settings.get("phase3_time_lambda", 0.5)
     grad_accum_steps = training_settings.get("grad_accumulation_steps", 1)
 
-    def run_epoch(loader, epoch, train_flag):
+    def run_epoch(loader, train_flag):
         model.train() if train_flag else model.eval()
         total_loss = total_risk = total_time = 0.0
         accum_step = 0
@@ -1157,7 +1035,7 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
                               leave=False, mininterval=5.0, miniters=10, dynamic_ncols=True):
                 batch = {k: v.to(device) for k, v in batch.items()}
 
-                labels, gt_time, present = _build_patient_labels(
+                labels, gt_time, present = build_patient_labels(
                     model, batch, training_settings, device,
                 )
                 risk_idx = model.task_heads.risk_idx.to(device)
@@ -1208,8 +1086,8 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
         return total_loss / n, total_risk / n, total_time / n
 
     for epoch in range(start_epoch, training_settings["phase3_n_epochs"] + 1):
-        tr_tot, tr_risk, tr_time = run_epoch(train_dl, epoch=epoch, train_flag=True)
-        vl_tot, vl_risk, vl_time = run_epoch(val_dl,   epoch=epoch, train_flag=False)
+        tr_tot, tr_risk, tr_time = run_epoch(train_dl, train_flag=True)
+        vl_tot, vl_risk, vl_time = run_epoch(val_dl,   train_flag=False)
 
         train_losses.append(tr_tot)
         val_losses.append(vl_tot)

@@ -12,7 +12,6 @@ TEST_CTX_DATA_FILE       = os.path.join(PROJECT_ROOT, 'data', 'test', 'context_d
 QA_DATA_FILE             = os.path.join(PROJECT_ROOT, 'data', 'source', 'qa_data.csv')
 
 # Define the prediction targets, <bot>, <eot> tokens to terminate the inference.
-# Outcome-snip (16 -> 11 head targets): five outcomes that never achieved
 # above-prevalence discrimination under any recipe across the P-/I-sequences
 # were removed as outcome-head targets — HYPEROSMOLALITY_EVENT, INFECTION_EVENT,
 # ACIDOSIS_EVENT, ATHEROSCLEROSIS_EVENT, ACUTE_RESPIRATORY_DISORDER_EVENT. Their
@@ -28,20 +27,17 @@ _CLINICAL_OUTCOMES = [
     "KETOACIDOSIS_EVENT",
     "ACIDOSIS_EVENT",
 ]
-# DEATH-isolation experiments (supervisor-directed). Which outcomes get task heads:
-#   regular         : OUTCOMES = _CLINICAL_OUTCOMES ; TERMINAL_OUTCOMES = [RELEASE, DEATH]
-#   Exp A DEATH-only: OUTCOMES = []                 ; TERMINAL_OUTCOMES = [RELEASE, DEATH]
-#   Exp B no-DEATH  : OUTCOMES = _CLINICAL_OUTCOMES ; TERMINAL_OUTCOMES = [RELEASE]
+
 # Clinical tokens always remain in the LM vocab (built from data) regardless.
-OUTCOMES = _CLINICAL_OUTCOMES   # m-clin: non-terminal clinical outcomes
+OUTCOMES = _CLINICAL_OUTCOMES
 # Note: prediction targets are different from thesis dataset (Kinneret) due to different available prediction targets
 # KETOACIDOSIS_EVENT and ACIDOSIS_EVENT are available in the data, but low support will auto-reduct them (OUTCOME_RARE_THRESHOLD_PCT)
 
-ADMISSION_TOKEN = "ADMISSION_EVENT"
+ADMISSION_TOKEN = "ADMISSION_EVENT" # <BOT> token
 DEATH_TOKEN = "DEATH_EVENT"
 RELEASE_TOKEN = "RELEASE_EVENT"
 
-TERMINAL_OUTCOMES = [RELEASE_TOKEN, DEATH_TOKEN]   # full outcomes (QA ablation)
+TERMINAL_OUTCOMES = [RELEASE_TOKEN, DEATH_TOKEN]   # <EOT> tokens  (only 1 appears per admission)
 
 MEAL_TOKENS = ["MEAL_CONTEXT_Breakfast", "MEAL_CONTEXT_Lunch", "MEAL_CONTEXT_Dinner", "MEAL_CONTEXT_Night-Snack"] # Keep ordered! concept_value tokens
 

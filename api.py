@@ -1,13 +1,31 @@
 """
-api.py — EMR Autoresearch immutable contract (BERT-pivot edition).
+api.py — EMR Autoresearch immutable training/eval contract (BERT-pivot edition).
 
-DO NOT MODIFY this file. It defines the fixed training pipeline and evaluation
-metrics. To experiment with model architecture or hyperparameters, edit files
-under transform_emr/ (and its config/ sub-package).
+The default invocation (`python api.py`) is the immutable training+eval
+pipeline. The DO NOT MODIFY rule applies to that path: the per-run summary
+block printed after the "---" separator is the ground-truth result for every
+ledger row. To experiment with model architecture or hyperparameters, edit
+files under transform_emr/ (and its config/ sub-package).
+
+Four additional CLI modes wrap utility flows on top of the same data
+pipeline (none of them affect a default training run):
+    --smoke              quick gate: sample=50, 1 epoch per phase
+    --build-cache        run load_data() and exit — pre-warms processed_datasets.pt
+                          so subsequent training starts with zero data overhead
+    --diagnose           skip training; run diagnose.run_diagnostics
+    --bootstrap [B]      skip training; B-resample patient bootstrap CIs
+
+Note: the default training run already builds + persists the cache the first
+time it runs; --build-cache is purely a "pre-warm without spending epochs"
+convenience for fresh pods or data-pipeline sanity checks.
 
 Usage:
     python api.py
-    python api.py > run.log 2>&1   (redirect all output to log)
+    python api.py > results/logs/run.log 2>&1
+    python api.py --smoke > results/logs/smoke.log 2>&1
+    python api.py --build-cache
+    python api.py --diagnose > results/logs/diag.log 2>&1
+    python api.py --bootstrap 2000 > results/logs/boot.log 2>&1
 
 The agent reads program.md for context, edits transform_emr/ files, then runs
 this script to train and evaluate. The summary block (after the "---" separator)
@@ -66,7 +84,34 @@ from transform_emr.config.model_config import MODEL_CONFIG, TRAINING_SETTINGS
 from transform_emr.embedder import EMREmbedding, train_embedder
 from transform_emr.transformer import EMREncoder, pretrain_transformer, finetune_transformer
 
-from evaluation import evaluate_on_test_set
+from evaluation import evaluate_on_test_set, bootstrap_evaluate
+
+# ===========================================================================
+# CLI dispatcher  (only active when api.py is executed directly; importable
+# as a module — `import api` from the smoke/diagnose paths used to do this
+# explicitly, now handled by --smoke below — does not parse argv).
+# ===========================================================================
+_CLI = None
+if __name__ == "__main__":
+    import argparse
+    _p = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
+    _p.add_argument("--smoke", action="store_true",
+                    help="quick gate: sample=50, 1 epoch per phase")
+    _p.add_argument("--build-cache", dest="build_cache", action="store_true",
+                    help="run load_data() and exit — pre-warms processed_datasets.pt")
+    _p.add_argument("--diagnose", action="store_true",
+                    help="skip training; run diagnose.run_diagnostics on the cached Phase-3 checkpoint")
+    _p.add_argument("--bootstrap", type=int, nargs="?", const=2000, default=None, metavar="B",
+                    help="skip training; B patient-resample bootstrap CIs on the cached checkpoint (default 2000)")
+    _p.add_argument("--sample", type=int, default=None,
+                    help="override TRAINING_SETTINGS['sample'] (for --diagnose / --bootstrap on sampled splits)")
+    _CLI = _p.parse_args()
+    if _CLI.smoke:
+        TRAINING_SETTINGS.update({
+            "sample": 50, "phase1_n_epochs": 1,
+            "phase2_n_epochs": 1, "phase3_n_epochs": 1,
+        })
+        print(f"[smoke] settings patched: sample=50, all phases 1 epoch")
 
 # ===========================================================================
 # Fixed paths — do not modify
@@ -220,6 +265,70 @@ def load_data(sample=None, batch_size=64):
 
 
 TRAIN_SUMMARY_PATH = os.path.join(CHECKPOINT_DIR, "train_summary.json")
+
+# ===========================================================================
+# --build-cache early dispatch (run load_data() once and exit; the natural
+# `processed_datasets.pt` is created as a side-effect for subsequent runs).
+# ===========================================================================
+if _CLI is not None and _CLI.build_cache:
+    _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    _sample = _CLI.sample if _CLI.sample is not None else TRAINING_SETTINGS.get("sample")
+    print(f"[build-cache] sample={_sample}")
+    _train_dl, _val_dl, _tokenizer, _test_raw = load_data(
+        sample=_sample, batch_size=TRAINING_SETTINGS["batch_size"],
+    )
+    _ntrain = len(_train_dl.dataset) if hasattr(_train_dl, "dataset") else "?"
+    _nval   = len(_val_dl.dataset)   if hasattr(_val_dl, "dataset")   else "?"
+    print(f"[build-cache] done — {_ntrain} train / {_nval} val patients "
+          f"(cache at {PROCESSED_CACHE}).")
+    sys.exit(0)
+
+# ===========================================================================
+# --diagnose / --bootstrap early dispatch (skip training entirely; load the
+# cached Phase-3 checkpoint, dispatch to the requested utility, then exit).
+# ===========================================================================
+if _CLI is not None and (_CLI.diagnose or _CLI.bootstrap):
+    _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    _sample = _CLI.sample if _CLI.sample is not None else TRAINING_SETTINGS.get("sample")
+    print(f"[cli] mode={'diagnose' if _CLI.diagnose else 'bootstrap'} "
+          f"sample={_sample} device={_device}")
+
+    _train_dl, _val_dl, _tokenizer, _test_raw = load_data(
+        sample=_sample, batch_size=TRAINING_SETTINGS["batch_size"],
+    )
+    for _batch in _val_dl:
+        MODEL_CONFIG["ctx_dim"] = _batch["context_vec"].shape[-1]
+        break
+
+    _p3_path = Path(PHASE3_CHECKPOINT)
+    _p3_last = _p3_path.parent / "ckpt_last.pt"
+    _ckpt = _p3_path if _p3_path.exists() else (_p3_last if _p3_last.exists() else None)
+    if _ckpt is None:
+        print(f"[cli][error] no Phase-3 checkpoint at {PHASE3_CHECKPOINT}; train first.")
+        sys.exit(1)
+
+    _embedder, *_ = EMREmbedding.load(EMBEDDER_CHECKPOINT, tokenizer=_tokenizer)
+    _embedder.to(_device)
+    _model, *_ = EMREncoder.load(str(_ckpt), embedder=_embedder, attach_task_heads=True)
+    _model.to(_device)
+    print(f"[cli] loaded model from {_ckpt}")
+
+    if _CLI.diagnose:
+        from transform_emr.diagnose import run_diagnostics
+        _p = TRAINING_SETTINGS.get("phase2_mlm_ratio", 0.15)
+        run_diagnostics(_model, _val_dl, n_batches=4, p=_p)
+        print("[diag] done.")
+    else:  # --bootstrap
+        _scaler = joblib_load(os.path.join(CHECKPOINT_DIR, "scaler.pkl"))
+        _test_temporal_raw, _test_ctx_raw = _test_raw
+        bootstrap_evaluate(
+            model=_model, tokenizer=_tokenizer,
+            test_temporal_raw=_test_temporal_raw, test_ctx_raw=_test_ctx_raw,
+            scaler=_scaler, checkpoint_dir=CHECKPOINT_DIR,
+            batch_size=TRAINING_SETTINGS["batch_size"],
+            B=int(_CLI.bootstrap), seed=RANDOM_SEED,
+        )
+    sys.exit(0)
 
 t_start = time.time()
 device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -418,6 +527,12 @@ print(f"length_of_stay_mae_hours:  {eval_results['length_of_stay_mae_hours']:.4f
 print(f"length_of_stay_median_hrs: {eval_results['length_of_stay_median_hours']:.4f}")
 print(f"length_of_stay_p90_hours:  {eval_results['length_of_stay_p90_hours']:.4f}")
 print(f"length_of_stay_n_patients: {eval_results['length_of_stay_n_patients']}")
+# Constant-predictor baseline (MAE of "always predict GT median LoS") + lift.
+# A useful model must do better than `length_of_stay_baseline_mae_hours`; lift
+# ≤ 0 means the time head has not learned LoS signal beyond a constant.
+print(f"length_of_stay_baseline_mae_hours: {eval_results.get('length_of_stay_baseline_mae_hours', float('nan')):.4f}")
+print(f"length_of_stay_gt_median_hours:    {eval_results.get('length_of_stay_gt_median_hours',    float('nan')):.4f}")
+print(f"length_of_stay_lift_hours:         {eval_results.get('length_of_stay_lift_hours',         float('nan')):.4f}")
 
 # Per-outcome patient AUC + F1 — grep-friendly TSV.
 print("patient_per_outcome\toutcome\tauroc\tauprc\tmax_f1\tmax_f1_threshold\tf1_at_0_5\tn_pos\tn_neg\tprevalence")
@@ -433,12 +548,16 @@ if _pat_tbl is not None:
               f"{int(_row['n_pos'])}\t{int(_row['n_neg'])}\t{_row['prevalence']:.6f}")
 
 # Per-outcome time-head MAE (single-pass; positives only, distance to nearest GT occurrence).
-print("time_head_mae_hrs\toutcome\tmae_hours\tn_patients")
+# baseline = MAE of constant-median predictor; lift = baseline − model (positive ⇒ model > constant).
+print("time_head_mae_hrs\toutcome\tmae_hours\tbaseline_mae_hours\tlift_hours\tgt_median_hours\tn_patients")
 _mae_tbl = eval_results.get("time_mae_table")
 if _mae_tbl is not None and len(_mae_tbl) > 0:
     for _outcome, _row in _mae_tbl.iterrows():
-        _mae = f"{_row['mae_hours']:.4f}" if not pd.isna(_row['mae_hours']) else "nan"
-        print(f"time_head_mae_hrs\t{_outcome}\t{_mae}\t{int(_row['n_patients'])}")
+        _mae   = f"{_row['mae_hours']:.4f}"          if not pd.isna(_row['mae_hours'])          else "nan"
+        _base  = f"{_row['baseline_mae_hours']:.4f}" if not pd.isna(_row['baseline_mae_hours']) else "nan"
+        _lift  = f"{_row['lift_hours']:.4f}"         if not pd.isna(_row['lift_hours'])         else "nan"
+        _gtmed = f"{_row['gt_median_hours']:.4f}"    if not pd.isna(_row['gt_median_hours'])    else "nan"
+        print(f"time_head_mae_hrs\t{_outcome}\t{_mae}\t{_base}\t{_lift}\t{_gtmed}\t{int(_row['n_patients'])}")
 
 print(f"phase2_best_val:  {phase2_best:.6f}")
 print(f"phase2_epochs:    {phase2_epochs}")

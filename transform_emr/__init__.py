@@ -4,7 +4,7 @@ from transform_emr.dataset import (
     DataProcessor, EMRDataset, EMRTokenizer, collate_emr, get_dataloader,
 )
 from transform_emr.embedder import EMREmbedding, train_embedder
-from transform_emr.inference import predict, get_token_embedding
+from transform_emr.inference import predict
 from transform_emr.transformer import (
     EMREncoder, TaskHeads, PerOutcomeAttnPool,
     pretrain_transformer, finetune_transformer,
@@ -25,6 +25,5 @@ __all__ = [
     "pretrain_transformer",
     "finetune_transformer",
     "predict",
-    "get_token_embedding",
     "run_diagnostics",
 ]

@@ -1,16 +1,20 @@
-# autoresearch — EMR Event Prediction (BERT-pivot)
+# autoresearch — EMR Event Prediction
 
-Autonomous architecture and hyperparameter search for the BERT-style
-bidirectional transformer adaptation of my thesis's EMR complication-prediction
-model. Adapted from Karpathy's autoresearcher framework.
+Bidirectional BERT-style transformer for multi-outcome prediction from
+temporal interval EMR data. Inputs are knowledge-base temporal abstractions
+(TAK / KB intervals); outputs are per-outcome patient-level risk + per-outcome
+time-to-event. The repo also hosts an autonomous-research loop where an AI
+agent edits the encoder, retrains, evaluates, and KEEPs / DISCARDs each
+direction. Adapted from Karpathy's autoresearcher framework.
 
-An AI agent drives the loop: edit `transform_emr/`, train all three phases on
-the held-out 70/15/15 patient split, evaluate on the held-out test set via
-single-pass inference, KEEP or DISCARD per the rules in `program.md`, log to
-`results/results.tsv`, repeat.
+- **Methodology, eval contract, KEEP rule, loop discipline** → [`program.md`](program.md).
+- **Polished headline results (CIs, per-outcome breakdowns, ablations)** → [`results/README.md`](results/README.md).
+- **Full agent journal (every iteration)** → [`results/status.md`](results/status.md).
+- **Headline ledger (one row per experiment)** → [`results/results.tsv`](results/results.tsv).
 
-See `program.md` for the model overview, the three-phase experiment plan,
-and the loop discipline the agent follows.
+> The `results/` folder is gitignored; it lives locally / on Drive, not on
+> GitHub. The agent writes to it at training time and the human reads it
+> when writing the paper.
 
 ---
 
@@ -18,52 +22,39 @@ and the loop discipline the agent follows.
 
 ```
 api.py                       fixed: data load, training orchestration, eval call
-evaluation.py                fixed: single-pass eval (patient AUPRC/AUROC/F1, LoS MAE)
-build_cache.py               helper to pre-build a minimal processed_datasets.pt
-program.md                   model overview + 3-phase experiment plan + loop discipline
-status.md                    sweep narrative (agent appends ### <tag> blocks)
-results/
-  results.tsv                full per-experiment ledger
+                             CLI: --smoke | --build-cache | --diagnose | --bootstrap [B]
+evaluation.py                fixed: single-pass eval + bootstrap CIs (patient AUPRC/AUROC/F1, LoS MAE)
+program.md                   model overview + eval contract + loop discipline (methodology)
+README.md                    this file — usage + ops
+
 transform_emr/
   config/
-    model_config.py          MODEL_CONFIG + TRAINING_SETTINGS (agent edits this)
+    model_config.py          MODEL_CONFIG + TRAINING_SETTINGS (the things you edit)
     dataset_config.py        paths, tokens, USE_QA_DATA flag
-    tak-repo-portable.json   knowledge-base hierarchy (Mediator output)
+    tak-repo-portable.json   knowledge-base hierarchy (TAK / KB intervals)
   embedder.py                Phase-1 EMREmbedding + train_embedder
   transformer.py             Phase-2/3 EMREncoder + TaskHeads + pretrain/finetune
   inference.py               single-pass predict()
   dataset.py                 DataProcessor, EMRTokenizer, dataloaders
-  loss.py / schedulers.py / utils.py / diagnose.py
+  diagnose.py                run_diagnostics — MLM/pool/time-aux probes
+  schedulers.py              LR + aux-lambda schedule controllers
+  utils.py                   tensor helpers (masking, LUTs, targets)
+
+results/                     ← gitignored, Drive-backed
+  README.md                  polished paper-facing results
+  status.md                  full agent journal
+  results.tsv                ledger
+  logs/                      per-run logs (run.log, smoke.log, boot_*, diag_*)
+
 data/source/                 temporal_data.csv + context_data.csv  (gitignored)
-checkpoints/                 phase{1,2,3}/ckpt_best.pt + tokenizer + scaler
+checkpoints/                 phase{1,2,3}/ckpt_best.pt + tokenizer + scaler  (gitignored)
+checkpoints.bak_keep_<tag>/  per-KEEP weight backups  (gitignored)
+checkpoints_export/          local mirror of deliverable weights  (gitignored)
 ```
 
-`api.py` and `evaluation.py` are the fixed contract. The agent only edits
-`transform_emr/config/model_config.py` (primary) and architecture files under
-`transform_emr/`.
-
----
-
-## Three-phase model
-
-- **Phase 1 — `EMREmbedding`** — hierarchical token embeddings (raw → concept →
-  concept+value → position), Time2Vec for absolute timestamps, static patient
-  context. Loss: per-window outcome BCE + Δt MSE.
-- **Phase 2 — `EMREncoder`** — 4-layer bidirectional transformer with AdaLN-Zero
-  patient conditioning + temporal RoPE. MLM pre-training: full-vocab CE on
-  masked positions (atomic-interval mask) + `t_pos` and `t_local` time
-  auxiliaries.
-- **Phase 3 — `TaskHeads`** — per-outcome attention pool + shared MLP →
-  (risk_head, time_head). Backbone at `phase3_backbone_lr_factor` LR; heads at
-  full LR. Risk BCE + λ_time · smooth-L1.
-
-Inference is a single bidirectional pass via `inference.predict`. No
-autoregressive generation. Output: one row per patient with `P_<outcome>` and
-`T_<outcome>` columns.
-
-Evaluation: 3-way patient split by `PatientId` with seed=42 (70 % train / 15 %
-val / 15 % test). The 15 % test split is held out, processed once with the
-training-fitted scaler, and consumed only by `evaluate_on_test_set`.
+`api.py` and `evaluation.py` are the fixed contract — they define the
+training pipeline and the metrics that every ledger row is comparable against.
+Edits live under `transform_emr/` (primarily `config/model_config.py`).
 
 ---
 
@@ -76,34 +67,52 @@ pip install -e .
 #   data/source/temporal_data.csv
 #   data/source/context_data.csv
 
-# Smoke test (50 patients, 1 epoch per phase, fast). In
-# transform_emr/config/model_config.py set:
-#   TRAINING_SETTINGS["sample"] = 50
-#   TRAINING_SETTINGS["phase1_n_epochs"] = 1
-#   TRAINING_SETTINGS["phase2_n_epochs"] = 1
-#   TRAINING_SETTINGS["phase3_n_epochs"] = 1
-python api.py > smoke.log 2>&1
-grep "^patient_auroc_weighted:\|^---" smoke.log
+# (Optional) Pre-warm the processed-datasets cache so the first real
+# training run starts with zero data-pipeline overhead. The default
+# `python api.py` does this automatically on first run.
+python api.py --build-cache
 
-# Full run (restore sample=None and original epoch counts)
-python api.py > run.log 2>&1
-grep "^patient_auroc_weighted:\|^patient_auprc_weighted:\|^length_of_stay_mae_hours:\|^peak_vram_mb:" run.log
+# Smoke test (sample=50, 1 epoch per phase, ~60s on GPU)
+python api.py --smoke > results/logs/smoke.log 2>&1
+grep "^patient_auroc_weighted:\|^---" results/logs/smoke.log
+
+# Full run (sample=None, default epoch counts)
+python api.py > results/logs/run.log 2>&1
+grep "^patient_auroc_weighted:\|^patient_auprc_weighted:\|^length_of_stay_mae_hours:\|^peak_vram_mb:" results/logs/run.log
+
+# Bootstrap CIs on the trained Phase-3 checkpoint (B=2000 patient resample)
+python api.py --bootstrap 2000 > results/logs/boot.log 2>&1
+
+# Post-training diagnostics (MLM top-1/5, pool entropy, time-aux residuals)
+python api.py --diagnose --sample 10000 > results/logs/diag.log 2>&1
 ```
 
-All output goes to a final summary block after the `---` separator.
-Per-outcome AUROC/AUPRC/F1 + time-MAE are emitted as grep-friendly TSV rows
-(`patient_per_outcome\t…`, `time_head_mae_hrs\t…`).
+`api.py` emits a summary block after the `---` separator. Per-outcome
+metrics are emitted as grep-friendly TSV rows (`patient_per_outcome\t…`,
+`time_head_mae_hrs\t…`).
+
+**Tuning the recipe.** Edit `transform_emr/config/model_config.py` and re-run
+`python api.py`. The Phase-1 embedder is reused automatically when
+`(embed_dim, time2vec_dim, ctx_dim)` is unchanged — set a different value to
+force a Phase-1 retrain. Tokenizer-affecting changes (`USE_QA_DATA` toggle)
+require clearing the cache before the next run:
+
+```bash
+rm -f checkpoints/tokenizer.pt checkpoints/scaler.pkl checkpoints/processed_datasets.pt
+rm -rf checkpoints/phase1
+```
 
 ---
 
 ## Running on a RunPod GPU pod
 
-The agent runs autonomously inside `tmux` so it survives SSH drops.
+Training is GPU-bound; one full run is ~8 h on an RTX A4500. The agent
+runs autonomously inside `tmux` so it survives SSH drops.
 
-**One-time setup on a fresh pod:**
+### One-time setup on a fresh pod
 
 ```bash
-# SSH in (RunPod gives you the host/port on the Connect page)
+# SSH in (RunPod gives you HOST/PORT on the Connect page)
 ssh root@<HOST> -p <PORT> -i ~/.ssh/id_ed25519
 
 # Install tmux + Node 20 + Claude Code
@@ -112,74 +121,95 @@ curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
 apt-get install -y nodejs
 npm install -g @anthropic-ai/claude-code
 
-# Clone + install Python deps
+# Clone + install Python deps (working branch holds all experiment history)
 cd /workspace
 git clone https://github.com/shaharoded/Transform-EMR-Encoder.git autoresearch
 cd autoresearch
-git checkout autoresearch-updates       # working branch — all experiments live here
+git checkout autoresearcher-updates
 pip install -e .
 
-# Create a non-root user (Claude refuses --dangerously-skip-permissions as root)
+# Non-root user (Claude refuses --dangerously-skip-permissions as root)
 useradd -m -s /bin/bash agent
 cp -r /root/.ssh /home/agent/ && chown -R agent:agent /home/agent/.ssh
 chmod -R a+rwX /workspace/autoresearch
 ```
 
-**SCP the data files (from local PowerShell):**
+### SCP the data files (from local PowerShell)
 
 ```powershell
 scp -P <PORT> -i ~/.ssh/id_ed25519 data\source\temporal_data.csv root@<HOST>:/workspace/autoresearch/data/source/
 scp -P <PORT> -i ~/.ssh/id_ed25519 data\source\context_data.csv  root@<HOST>:/workspace/autoresearch/data/source/
 ```
 
-**Start the agent (each session):**
+### Start the agent (each session)
 
 ```bash
 ssh root@<HOST> -p <PORT> -i ~/.ssh/id_ed25519
 su - agent
 cd /workspace/autoresearch
-tmux new -s claude
+tmux new -A -s claude            # -A reattaches if the session already exists
 claude --dangerously-skip-permissions
 ```
 
-In the Claude prompt, kick off the loop with something like:
+Initial kickoff prompt (paste once at the Claude prompt):
 
-> Read `program.md`. We are on branch `autoresearch-updates` of
-> `Transform-EMR-Encoder`. Run the experiment loop autonomously — smoke test,
-> full run, KEEP/DISCARD, update `status.md` + `results/results.tsv` after
-> every meaningful step, and commit & push to `autoresearch-updates`. Never
-> `git reset --hard` or force-push — DISCARDs go through `git revert`.
+> Read `program.md`. We are on branch `autoresearcher-updates` of
+> `Transform-EMR-Encoder`. Run the experiment loop autonomously — smoke
+> test, full run, KEEP / DISCARD per the rules, update `results/status.md`
+> and `results/results.tsv` after every meaningful step, and commit + push
+> to `autoresearcher-updates`. Never `git reset --hard` or force-push —
+> DISCARDs go through `git revert`.
 
-Detach with `Ctrl-b d`. Reattach later with `tmux attach -t claude`.
+Detach with `Ctrl-b d`. Reattach with the same `tmux new -A -s claude`
+or `tmux attach -t claude`. Make tmux scrollable with `Ctrl-b [` (then
+`q` to exit copy mode), or enable mouse wheel via `set -g mouse on` in
+`~/.tmux.conf`.
 
-**Monitoring from your laptop:**
+### Monitoring without disturbing the agent
 
 ```bash
-# Read the live journal without disturbing the agent
-ssh root@<HOST> -p <PORT> -i ~/.ssh/id_ed25519 "cat /workspace/autoresearch/status.md"
+# Read the live journal
+ssh root@<HOST> -p <PORT> -i ~/.ssh/id_ed25519 \
+  "cat /workspace/autoresearch/results/status.md"
 
-# Or pull whenever the agent has pushed
+# Or pull on your laptop whenever the agent has pushed
 git pull --ff-only
 ```
 
-**Before stopping the pod:** push the branch from the pod so nothing is lost
-on container disk. SCP off `checkpoints/` if you want to keep the trained
-weights (gitignored, too large for git).
+### Before stopping the pod
+
+1. Push the working branch from inside the pod — anything uncommitted on
+   container disk is lost when the pod stops.
+2. SCP off `checkpoints.bak_keep_*/` if you want the trained weights (each
+   ~95 MB; gitignored).
+3. SCP off `results/` if you want logs / journal on Drive (gitignored).
+
+If the pod can't push directly (no GitHub creds), bundle the branch and
+pull from the bundle on your laptop:
+
+```bash
+# on the pod
+git bundle create /tmp/agent.bundle autoresearcher-updates
+
+# on your laptop
+scp -P <PORT> -i ~/.ssh/id_ed25519 root@<HOST>:/tmp/agent.bundle ./
+git fetch ./agent.bundle autoresearcher-updates:refs/remotes/pod/autoresearcher-updates
+git merge --ff-only pod/autoresearcher-updates
+git push
+```
 
 ---
 
-## Metrics
+## Git workflow
 
-All on the held-out 15 % test split via a single bidirectional encoder pass,
-per outcome, then averaged across outcomes with ≥ 1 % patient prevalence.
-`RELEASE_EVENT` is excluded from AUC/AUPRC/F1 (≈ ¬DEATH in this cohort) and
-reported separately via length-of-stay MAE.
+- Working branch is **`autoresearcher-updates`**. All commits land there.
+- `main` is untouched.
+- DISCARDs go through `git revert` — never `git reset --hard` and never
+  force-push. The failed-experiment commit + its `status.md` block stays in
+  history as a record of what was tried and why.
+- Tokenizer changes (vocab additions) bump the model checkpoint format; the
+  Phase-1 reuse guard in `api.py` handles the safe cases.
+- `results/` is gitignored — it travels via Drive, not GitHub.
 
-- **`patient_auprc_weighted`** — **primary**, ↑. Support-weighted mean per-outcome AUPRC.
-- **`time_head_mae_hrs:<outcome>`** — per-outcome time-head MAE on positives, ↓.
-- **`length_of_stay_mae_hours`** — RELEASE time-head regression, ↓.
-- **`patient_auroc_weighted`** — secondary, ↑. Discrimination sanity check.
-- **`patient_max_f1_weighted`** / **`patient_f1_at_0_5_weighted`** — calibration sanity, ↑.
-
-All means are weighted by support (`n_pos`); macro means are emitted but never
-drive KEEP decisions. See `program.md` for the full priority rules.
+The full git discipline (forbidden ops, rollback path, rationale) lives in
+`program.md` under **Git discipline**.
