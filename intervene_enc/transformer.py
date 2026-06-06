@@ -20,9 +20,6 @@ Three heads are exposed:
 Phase-3 attaches a :class:`TaskHeads` module containing a per-outcome
 attention pool and shared MLP that produces patient-level risk + time
 predictions.  The encoder is fine-tuned at ``phase3_backbone_lr_factor``.
-
-The legacy autoregressive model lives in ``transform_emr.legacy.transformer``
-and is preserved for thesis comparisons.
 """
 
 import math
@@ -36,15 +33,16 @@ from pathlib import Path
 from tqdm.auto import tqdm
 
 # ───────── local code ─────────────────────────────────────────────────── #
-from transform_emr.embedder import EMREmbedding
-from transform_emr.config.model_config import *
-from transform_emr.config.dataset_config import (
-    OUTCOMES, TERMINAL_OUTCOMES, RELEASE_TOKEN, DEATH_TOKEN,
+from intervene_enc.embedder import EMREmbedding
+from intervene_enc.config.model_config import *
+from intervene_enc.config.dataset_config import (
+    OUTCOMES, TERMINAL_OUTCOMES, RELEASE_TOKEN,
 )
-from transform_emr.utils import (
+from intervene_enc.utils import (
     set_seed, build_luts, apply_mlm_mask, logger, plot_losses,
+    time_to_neighbour_targets, build_patient_labels,
 )
-from transform_emr.schedulers import LambdaScheduleController, LRScheduleController
+from intervene_enc.schedulers import LambdaScheduleController, LRScheduleController
 
 
 # ───────── components  ───────────────────────────────────────────────── #
@@ -274,7 +272,7 @@ class TaskHeads(nn.Module):
 
 
 # ───────── the BERT-style encoder that consumes EMREmbedding ──────────── #
-class EMREncoder(nn.Module):
+class InterveneEncoder(nn.Module):
     """
     Bidirectional transformer encoder over an external :class:`EMREmbedding`.
 
@@ -304,9 +302,9 @@ class EMREncoder(nn.Module):
 
         vocab_size = self.embedder.decoder.out_features
 
-        assert hasattr(self.embedder.tokenizer, "id2token"), "[EMREncoder] Embedder missing id2token map"
+        assert hasattr(self.embedder.tokenizer, "id2token"), "[InterveneEncoder] Embedder missing id2token map"
         assert len(self.embedder.tokenizer.id2token) == vocab_size, (
-            f"[EMREncoder] id2token size mismatch: got {len(self.embedder.tokenizer.id2token)}, expected {vocab_size}"
+            f"[InterveneEncoder] id2token size mismatch: got {len(self.embedder.tokenizer.id2token)}, expected {vocab_size}"
         )
 
         # --- Backbone ---
@@ -339,13 +337,13 @@ class EMREncoder(nn.Module):
             nn.Linear(_aux_hidden, 1),
         )
 
-        # --- Outcome bookkeeping (mirrors the legacy GPT for ckpt parity) ---
+        # --- Outcome bookkeeping ---
         tok = self.embedder.tokenizer
         all_config_outcomes = sorted(list(set(OUTCOMES + TERMINAL_OUTCOMES)))
         in_vocab = [n for n in all_config_outcomes if n in tok.token2id]
         missing_outcomes = [n for n in all_config_outcomes if n not in tok.token2id]
         if missing_outcomes:
-            print(f"[EMREncoder] Outcomes not in tokenizer vocab (ignored): {missing_outcomes}")
+            print(f"[InterveneEncoder] Outcomes not in tokenizer vocab (ignored): {missing_outcomes}")
 
         if getattr(tok, "outcome_patient_ratios", None):
             valid_set = set(tok.outcome_patient_ratios.keys())
@@ -355,7 +353,7 @@ class EMREncoder(nn.Module):
 
         if not valid_outcomes:
             raise ValueError(
-                f"[EMREncoder] No valid outcomes found! Configured outcomes: {all_config_outcomes}."
+                f"[InterveneEncoder] No valid outcomes found! Configured outcomes: {all_config_outcomes}."
             )
         self.outcome_names = valid_outcomes
         self.num_outcomes = len(self.outcome_names)
@@ -376,7 +374,7 @@ class EMREncoder(nn.Module):
         # checkpoints stay slim and the head buffer indices can be tokenizer-derived.
         self.task_heads: TaskHeads | None = None
 
-        print(f"[EMREncoder]: Total params: {self.get_num_params()/1e6:.2f} M")
+        print(f"[InterveneEncoder]: Total params: {self.get_num_params()/1e6:.2f} M")
 
     # -------------------------------------------------------- helpers --- #
     def _init_weights(self, module):
@@ -409,6 +407,8 @@ class EMREncoder(nn.Module):
         K = self.num_outcomes
         all_idx = torch.arange(K, dtype=torch.long)
         if self._release_idx >= 0:
+            # Drop RELEASE from the risk head — P(RELEASE) = 1 − P(DEATH)
+            # in this cohort; LoS is reported via the RELEASE time-head.
             risk_idx = torch.tensor(
                 [i for i in range(K) if i != self._release_idx], dtype=torch.long,
             )
@@ -497,7 +497,7 @@ class EMREncoder(nn.Module):
         """
         if self.task_heads is None:
             raise RuntimeError(
-                "[EMREncoder.predict] task_heads not attached. Call "
+                "[InterveneEncoder.predict] task_heads not attached. Call "
                 "model.attach_task_heads() before Phase-3 training / inference."
             )
         hidden, pad_mask = self.encode(
@@ -600,7 +600,7 @@ class EMREncoder(nn.Module):
     @classmethod
     def load(cls, path, embedder, map_location="cpu", attach_task_heads=None):
         """
-        Purpose: Reconstruct an EMREncoder from a checkpoint.
+        Purpose: Reconstruct an InterveneEncoder from a checkpoint.
         Method:  Validate vocab + outcomes against the supplied embedder; build
                  the model; optionally re-attach task heads when the ckpt was
                  saved with them or the caller explicitly requests it.
@@ -618,20 +618,20 @@ class EMREncoder(nn.Module):
         """
         ckpt = torch.load(path, map_location=map_location, weights_only=True)
         if "config" not in ckpt:
-            raise ValueError("[EMREncoder.load] Invalid checkpoint: missing 'config'.")
+            raise ValueError("[InterveneEncoder.load] Invalid checkpoint: missing 'config'.")
 
         expected_vocab = ckpt["vocab_size"]
         actual_vocab = embedder.decoder.out_features
         if expected_vocab != actual_vocab:
             raise ValueError(
-                f"[EMREncoder.load] Embedder vocab size mismatch: ckpt={expected_vocab}, embedder={actual_vocab}"
+                f"[InterveneEncoder.load] Embedder vocab size mismatch: ckpt={expected_vocab}, embedder={actual_vocab}"
             )
 
         expected_outcome_names = set(ckpt.get("outcome_names", []))
         current_outcomes = set(OUTCOMES + TERMINAL_OUTCOMES)
         if expected_outcome_names and not expected_outcome_names.issubset(current_outcomes):
             raise ValueError(
-                f"[EMREncoder.load] Outcome configuration mismatch.\n"
+                f"[InterveneEncoder.load] Outcome configuration mismatch.\n"
                 f"  ckpt: {sorted(expected_outcome_names)}\n  current: {sorted(current_outcomes)}"
             )
 
@@ -660,14 +660,14 @@ class EMREncoder(nn.Module):
         if _th_missing and not want_heads:
             missing -= _th_missing
         elif _th_missing and want_heads:
-            print(f"[EMREncoder.load] task_heads not in ckpt — keeping random init "
+            print(f"[InterveneEncoder.load] task_heads not in ckpt — keeping random init "
                   f"({len(_th_missing)} keys). Expected on first Phase-3 epoch.")
             missing -= _th_missing
 
         if missing:
-            raise RuntimeError(f"[EMREncoder.load] Missing required keys: {sorted(missing)}")
+            raise RuntimeError(f"[InterveneEncoder.load] Missing required keys: {sorted(missing)}")
         if unexpected:
-            raise RuntimeError(f"[EMREncoder.load] Unexpected keys: {sorted(unexpected)}")
+            raise RuntimeError(f"[InterveneEncoder.load] Unexpected keys: {sorted(unexpected)}")
         model.load_state_dict(state, strict=False)
 
         embedder_device = next(embedder.parameters()).device
@@ -687,76 +687,6 @@ class EMREncoder(nn.Module):
 
 
 # ───────── Phase-2 training: MLM + time auxiliaries ─────────────────── #
-def _time_to_neighbour_targets(abs_ts, pad_mask, mlm_mask, max_hours=24.0):
-    """
-    Purpose: Build per-position local-gap targets for the time_to_neighbour aux.
-    Method:  For each masked position, gap = min(t - t_prev_unmasked,
-             t_next_unmasked - t). Distances computed over normalised abs_ts
-             (hours/336) and rescaled to hours/max_hours so the regression
-             target sits roughly in [0, 1].
-
-             Implementation is fully vectorised: cummax of (t * unmasked) gives
-             the most recent unmasked time to the left of every position; a
-             reversed cummax does the same for the right side.
-
-    Args:
-        abs_ts    (FloatTensor): [B, T] normalised abs timestamps (t/336h).
-        pad_mask  (BoolTensor):  [B, T] True at non-PAD positions.
-        mlm_mask  (BoolTensor):  [B, T] True at MLM-masked positions.
-        max_hours (float): rescale denominator.
-
-    Returns:
-        target  (FloatTensor): [B, T] local gap normalised to [0, ~1].
-        valid   (BoolTensor):  [B, T] positions that contribute to the loss
-                              (masked, non-PAD, with at least one unmasked
-                              neighbour in the sequence).
-    """
-    B, T = abs_ts.shape
-    device = abs_ts.device
-
-    unmasked = pad_mask & (~mlm_mask)            # [B, T]
-    # Sentinel: -inf to the left, +inf to the right so the cummax / -cummax
-    # idiom on positions without any unmasked neighbour yields the sentinel
-    # rather than a valid time — those positions are filtered out via `valid`.
-    big = abs_ts.new_full((B, T), 0.0)
-    inf = abs_ts.new_full((B, T), float("inf"))
-
-    # left-most reachable t at every position (most recent unmasked time ≤ i)
-    t_left = torch.where(unmasked, abs_ts, -inf)
-    t_left = torch.cummax(t_left, dim=1).values         # [B, T]
-
-    # right-most reachable t (nearest unmasked time ≥ i) via reverse cummax
-    t_right_rev = torch.where(unmasked.flip(1), abs_ts.flip(1), -inf)
-    t_right_rev = torch.cummax(t_right_rev, dim=1).values
-    t_right = -t_right_rev.flip(1) * 0.0 + 0.0  # placeholder, replaced below
-    # The above is a no-op placeholder kept clear; we now redo with min:
-    t_right_full = torch.where(unmasked, abs_ts, inf)
-    # cummin via -cummax(-x): cheaper than torch.cummin which exists since 1.13;
-    # use cummin directly for clarity.
-    t_right = torch.cummin(t_right_full.flip(1), dim=1).values.flip(1)
-
-    # Convert normalised-time gaps to hours, then to fraction of `max_hours`.
-    left_gap_hours  = (abs_ts - t_left) * 336.0
-    right_gap_hours = (t_right - abs_ts) * 336.0
-
-    has_left  = (t_left  > -float("inf"))
-    has_right = (t_right <  float("inf"))
-
-    # If only one side exists, use it; otherwise take the smaller gap.
-    only_left  = has_left & (~has_right)
-    only_right = has_right & (~has_left)
-    both       = has_left & has_right
-
-    gap_hours = torch.where(only_left,  left_gap_hours,
-                  torch.where(only_right, right_gap_hours,
-                  torch.minimum(left_gap_hours, right_gap_hours)))
-    gap_hours = gap_hours.clamp_min(0.0)
-
-    valid = pad_mask & mlm_mask & (has_left | has_right)
-    target = (gap_hours / max_hours).clamp(0.0, 5.0)
-    return target, valid
-
-
 @logger
 def pretrain_transformer(model, train_dl, val_dl, resume=True,
                          checkpoint_path=PHASE2_CHECKPOINT,
@@ -768,11 +698,10 @@ def pretrain_transformer(model, train_dl, val_dl, resume=True,
                • atomic-interval MLM mask is applied to the input batch;
                • encoder forward returns lm_logits + the two aux predictions;
                • main loss = full-vocab CE at masked positions only;
-               • aux losses follow LambdaScheduleController (same calibration
-                 scheme used in the AR pipeline).
+               • aux losses follow LambdaScheduleController calibration.
 
     Args:
-        model (EMREncoder): bidirectional encoder with attached embedder.
+        model (InterveneEncoder): bidirectional encoder with attached embedder.
         train_dl / val_dl : DataLoaders.
         resume (bool): resume from ``ckpt_last`` if present.
         checkpoint_path (str): destination for the best checkpoint.
@@ -796,7 +725,7 @@ def pretrain_transformer(model, train_dl, val_dl, resume=True,
         if pre_ckpt.get("training_settings") is not None:
             training_settings = pre_ckpt["training_settings"]
 
-    # Embedder is trainable in Phase-2 — same regime as the AR pipeline.
+    # Embedder is trainable in Phase-2 at 10× lower LR than the backbone.
     for p in model.embedder.parameters():
         p.requires_grad = True
     model.to(device)
@@ -811,11 +740,10 @@ def pretrain_transformer(model, train_dl, val_dl, resume=True,
     )
     scheduler = LRScheduleController(optimizer, training_settings, train_dl)
 
-    # MLM ratio ramp from 0 → 0.15 over the BCE-only window, then steady.
+    # MLM ratio ramp from 0 → phase2_mlm_ratio over the main-only window, then steady.
     mlm_p_max = training_settings.get("phase2_mlm_ratio", 0.15)
-    mlm_mode = training_settings.get("phase2_mlm_mask_mode", "positional")
-    cbm_ramp_epochs = training_settings["phase2_scheduler"]["bce_only_epochs"]
-    print(f"[Phase-2] MLM mask mode = {mlm_mode!r}, ratio target = {mlm_p_max}")
+    cbm_ramp_epochs = training_settings["phase2_scheduler"]["main_only_epochs"]
+    print(f"[Phase-2] MLM ratio target = {mlm_p_max}")
 
     start_epoch = 0
     best_val = float("inf")
@@ -824,7 +752,7 @@ def pretrain_transformer(model, train_dl, val_dl, resume=True,
 
     if resume and ckpt_last.exists():
         print(f"[Phase-2]: Loading model from checkpoint: {ckpt_last}")
-        loaded, start_epoch, best_val, opt_state, sch_state, lambda_schedule_state = EMREncoder.load(
+        loaded, start_epoch, best_val, opt_state, sch_state, lambda_schedule_state = InterveneEncoder.load(
             ckpt_last, embedder=model.embedder, map_location=device,
         )
         model = loaded
@@ -836,26 +764,18 @@ def pretrain_transformer(model, train_dl, val_dl, resume=True,
             scheduler.load_state_dict(sch_state)
         start_epoch += 1
 
-    # Phase-2 schedule: only two aux losses ('t_pos', 't_local').  We rebuild
-    # the schedule config so the scheduler treats them as the active stage
-    # without dragging the AR-era keys (ce, dt, ranking, ttt) into the run.
-    p2_sched_cfg = {
-        "bce_only_epochs": training_settings["phase2_scheduler"].get("bce_only_epochs", 2),
-        "aux_fraction_caps": {
-            "t_pos":   training_settings.get("phase2_t_pos_cap",   0.40),
-            "t_local": training_settings.get("phase2_t_local_cap", 0.30),
-        },
-        "order": [["t_pos", "t_local"]],
-        "ramp_epochs": {"t_pos": 0, "t_local": 0},
-    }
+    # Phase-2 schedule comes straight from TRAINING_SETTINGS["phase2_scheduler"]:
+    # main_only_epochs + aux_fraction_caps + order + ramp_epochs for the two
+    # active auxes (t_pos, t_local). Agent edits the config; no inline overrides.
     schedule_controller = LambdaScheduleController(
-        schedule_config=p2_sched_cfg, start_epoch=start_epoch,
+        schedule_config=training_settings["phase2_scheduler"],
+        start_epoch=start_epoch,
     )
     if lambda_schedule_state is not None:
         try:
             schedule_controller.load_state_dict(lambda_schedule_state)
         except Exception as e:
-            # Resume from an AR-era ckpt: skip the controller state cleanly.
+            # Resume from an incompatible ckpt: skip the controller state cleanly.
             print(f"[Phase-2] Could not restore aux schedule state ({e}); starting fresh.")
 
     train_losses, val_losses = [], []
@@ -875,7 +795,7 @@ def pretrain_transformer(model, train_dl, val_dl, resume=True,
                 batch = {k: v.to(device) for k, v in batch.items()}
 
                 # Mask ratio ramps with the foundational stage to keep early
-                # training stable (matches the cbm ramp in the AR pipeline).
+                # training stable.
                 if epoch <= cbm_ramp_epochs:
                     p_now = mlm_p_max * (epoch / max(1, cbm_ramp_epochs))
                 else:
@@ -887,7 +807,6 @@ def pretrain_transformer(model, train_dl, val_dl, resume=True,
                     forbid_ids=luts["forbid_mask_ids"],
                     luts=luts,
                     p=p_now,
-                    mode=mlm_mode,
                 )
 
                 with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
@@ -924,7 +843,7 @@ def pretrain_transformer(model, train_dl, val_dl, resume=True,
                     t_pos_raw = lm_logits.sum() * 0.0
 
                 # ---------- Aux 2: time-to-neighbour (masked only) ----------
-                t_local_target, tloc_valid = _time_to_neighbour_targets(
+                t_local_target, tloc_valid = time_to_neighbour_targets(
                     batch["abs_ts"], pad_mask, mlm_mask, max_hours=24.0,
                 )
                 if tloc_valid.any():
@@ -1017,57 +936,6 @@ def pretrain_transformer(model, train_dl, val_dl, resume=True,
 
 
 # ───────── Phase-3 training: per-outcome risk + time ─────────────────── #
-def _build_patient_labels(model, batch, training_settings, device):
-    """
-    Purpose: Build patient-level risk labels and per-outcome time targets.
-    Method:  For each outcome k, label[b, k] = 1 iff the outcome appears
-             anywhere in the GT trajectory of patient b.  gt_time[b, k] is the
-             first occurrence in hours from sequence start (clamped to the
-             training horizon).  Both are computed straight from the
-             ``position_ids`` / ``abs_ts`` tensors so no extra collate is
-             needed — the encoder's batch already carries what we need.
-
-    Args:
-        model              : EMREncoder (uses outcome_names / token2id).
-        batch              : dict with position_ids [B, T] and abs_ts [B, T].
-        training_settings  : config — uses ``outcome_horizon_hours`` for the
-                             label clip (336 h is the dataset horizon).
-        device             : torch device.
-
-    Returns:
-        labels   (FloatTensor): [B, K] {0., 1.} multi-label outcome flags.
-        gt_time  (FloatTensor): [B, K] hours from seq start to first occurrence.
-                                Positions with label=0 are filled with 0.0
-                                (loss masks them out).
-        present  (BoolTensor):  [B, K] True iff outcome present.
-    """
-    tok = model.embedder.tokenizer
-    outcome_ids = torch.tensor(
-        [tok.token2id[n] for n in model.outcome_names], dtype=torch.long, device=device,
-    )                                                              # [K]
-    K = outcome_ids.numel()
-
-    pos_ids = batch["position_ids"]                                # [B, T]
-    abs_ts  = batch["abs_ts"]                                      # [B, T] normalised
-    pad_mask = pos_ids != tok.pad_token_id                          # [B, T]
-    B, T = pos_ids.shape
-
-    # match[b, t, k] = 1 iff position (b, t) is the k-th outcome token, and non-pad.
-    match = (pos_ids.unsqueeze(-1) == outcome_ids.view(1, 1, K)) & pad_mask.unsqueeze(-1)
-    present = match.any(dim=1)                                     # [B, K]
-    labels = present.float()
-
-    # First occurrence time per (b, k): mask non-matches with +inf then argmin.
-    t_hours = abs_ts.unsqueeze(-1) * 336.0                          # [B, T, 1]
-    huge = torch.full_like(t_hours, float("inf"))
-    t_masked = torch.where(match, t_hours, huge)                    # [B, T, K]
-    first_t, _ = t_masked.min(dim=1)                                # [B, K]
-    horizon = float(training_settings.get("outcome_horizon_hours_p3", 336.0))
-    gt_time = torch.where(present, first_t.clamp(0.0, horizon), torch.zeros_like(first_t))
-
-    return labels, gt_time, present
-
-
 @logger
 def finetune_transformer(model, train_dl, val_dl, resume=True,
                          checkpoint_path=PHASE3_CHECKPOINT,
@@ -1084,7 +952,7 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
              full ``phase3_learning_rate``.
 
     Args:
-        model (EMREncoder): Phase-2 best ckpt loaded.
+        model (InterveneEncoder): Phase-2 best ckpt loaded.
         train_dl / val_dl : DataLoaders (natural distribution; ``pos_weight``
                             handles imbalance).
         resume (bool): resume from ``ckpt_last`` if present.
@@ -1115,8 +983,8 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
         if pre.get("training_settings") is not None:
             training_settings = pre["training_settings"]
 
-    # Per-outcome pos_weight from training prevalence (legacy convention:
-    # tokenizer.outcome_weights holds n_neg/n_pos at the token id).
+    # Per-outcome pos_weight from training prevalence:
+    # tokenizer.outcome_weights holds n_neg/n_pos at the token id.
     tok = model.embedder.tokenizer
     risk_idx_cpu = model.task_heads.risk_idx.cpu().tolist()
     risk_outcome_names = [model.outcome_names[i] for i in risk_idx_cpu]
@@ -1142,7 +1010,7 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
 
     if resume and ckpt_last.exists():
         print(f"[Phase-3]: Loading model from checkpoint: {ckpt_last}")
-        loaded, start_epoch, best_val, opt_state, *_ = EMREncoder.load(
+        loaded, start_epoch, best_val, opt_state, *_ = InterveneEncoder.load(
             ckpt_last, embedder=model.embedder, map_location=device, attach_task_heads=True,
         )
         model = loaded
@@ -1155,7 +1023,7 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
     lambda_time = training_settings.get("phase3_time_lambda", 0.5)
     grad_accum_steps = training_settings.get("grad_accumulation_steps", 1)
 
-    def run_epoch(loader, epoch, train_flag):
+    def run_epoch(loader, train_flag):
         model.train() if train_flag else model.eval()
         total_loss = total_risk = total_time = 0.0
         accum_step = 0
@@ -1167,7 +1035,7 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
                               leave=False, mininterval=5.0, miniters=10, dynamic_ncols=True):
                 batch = {k: v.to(device) for k, v in batch.items()}
 
-                labels, gt_time, present = _build_patient_labels(
+                labels, gt_time, present = build_patient_labels(
                     model, batch, training_settings, device,
                 )
                 risk_idx = model.task_heads.risk_idx.to(device)
@@ -1218,8 +1086,8 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
         return total_loss / n, total_risk / n, total_time / n
 
     for epoch in range(start_epoch, training_settings["phase3_n_epochs"] + 1):
-        tr_tot, tr_risk, tr_time = run_epoch(train_dl, epoch=epoch, train_flag=True)
-        vl_tot, vl_risk, vl_time = run_epoch(val_dl,   epoch=epoch, train_flag=False)
+        tr_tot, tr_risk, tr_time = run_epoch(train_dl, train_flag=True)
+        vl_tot, vl_risk, vl_time = run_epoch(val_dl,   train_flag=False)
 
         train_losses.append(tr_tot)
         val_losses.append(vl_tot)

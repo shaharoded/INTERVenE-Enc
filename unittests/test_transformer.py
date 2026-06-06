@@ -9,23 +9,23 @@ import math
 import torch
 import pytest
 
-from transform_emr.dataset import EMRTokenizer
-from transform_emr.embedder import EMREmbedding
-from transform_emr.transformer import (
-    EMREncoder, AdaLNBlock, BidirectionalSelfAttention,
-    PerOutcomeAttnPool, TaskHeads, _time_to_neighbour_targets,
+from intervene_enc.dataset import EMRTokenizer
+from intervene_enc.embedder import EMREmbedding
+from intervene_enc.transformer import (
+    InterveneEncoder, AdaLNBlock, BidirectionalSelfAttention,
+    PerOutcomeAttnPool, TaskHeads, time_to_neighbour_targets,
 )
-from transform_emr.utils import apply_mlm_mask, build_luts
+from intervene_enc.utils import apply_mlm_mask, build_luts
 
 
 # ─── fixtures ──────────────────────────────────────────────────────────── #
 @pytest.fixture(scope="module")
 def mini_tokenizer():
     """
-    Hand-rolled tokenizer with one outcome ("DEATH_EVENT") so EMREncoder can
+    Hand-rolled tokenizer with one outcome ("DEATH_EVENT") so InterveneEncoder can
     build its outcome bookkeeping without invoking the full DataProcessor.
     """
-    from transform_emr.config.dataset_config import DEATH_TOKEN, RELEASE_TOKEN, ADMISSION_TOKEN
+    from intervene_enc.config.dataset_config import DEATH_TOKEN, RELEASE_TOKEN, ADMISSION_TOKEN
 
     specials = ["[PAD]", "[MASK]", "[NULL]",
                 "[MASK_INTERVAL_START]", "[MASK_INTERVAL_END]"]
@@ -149,12 +149,12 @@ def test_task_heads_split_correctly():
     assert (time >= 0).all()
 
 
-def test_time_to_neighbour_targets_basic():
+def testtime_to_neighbour_targets_basic():
     # B=1, T=5: position 2 is masked, neighbours at t={0.0, 0.1, 0.3, 0.4} (h/336).
     abs_ts = torch.tensor([[0.0, 0.1, 0.2, 0.3, 0.4]])
     pad_mask = torch.ones(1, 5, dtype=torch.bool)
     mlm = torch.tensor([[False, False, True, False, False]])
-    target, valid = _time_to_neighbour_targets(abs_ts, pad_mask, mlm, max_hours=24.0)
+    target, valid = time_to_neighbour_targets(abs_ts, pad_mask, mlm, max_hours=24.0)
     # Local gap at position 2 = min(0.2-0.1, 0.3-0.2) * 336 = 0.1 * 336 = 33.6h.
     # 33.6 / 24 = 1.4.
     assert valid[0, 2].item() is True
@@ -165,7 +165,7 @@ def test_time_to_neighbour_targets_basic():
 
 # ─── full-encoder smoke ────────────────────────────────────────────────── #
 def test_encoder_forward_and_predict(mini_embedder, mini_tokenizer, encoder_cfg):
-    model = EMREncoder(cfg=encoder_cfg, embedder=mini_embedder, use_checkpoint=False)
+    model = InterveneEncoder(cfg=encoder_cfg, embedder=mini_embedder, use_checkpoint=False)
     model.eval()
     V = mini_embedder.decoder.out_features
     B, T = 2, 6
@@ -196,13 +196,13 @@ def test_encoder_forward_and_predict(mini_embedder, mini_tokenizer, encoder_cfg)
 
 
 def test_encoder_save_load_roundtrip(tmp_path, mini_embedder, encoder_cfg):
-    model = EMREncoder(cfg=encoder_cfg, embedder=mini_embedder, use_checkpoint=False)
+    model = InterveneEncoder(cfg=encoder_cfg, embedder=mini_embedder, use_checkpoint=False)
     model.attach_task_heads(hidden=16, n_heads=2)
 
     path = tmp_path / "encoder.pt"
     model.save(path, epoch=1, best_val=0.5)
 
-    loaded, epoch, best_val, *_ = EMREncoder.load(
+    loaded, epoch, best_val, *_ = InterveneEncoder.load(
         path, embedder=mini_embedder, attach_task_heads=True,
     )
     assert epoch == 1
@@ -275,7 +275,7 @@ def test_apply_mlm_mask_hierarchical_mode(mini_tokenizer):
     luts = build_luts(tk)
     out, _, mlm_mask = apply_mlm_mask(
         batch, tk, forbid_ids=luts["forbid_mask_ids"], luts=luts,
-        p=1.0, mode="hierarchical",
+        p=1.0,
     )
     if mlm_mask[0, 0]:
         # Fallback to generic [MASK].
@@ -284,7 +284,7 @@ def test_apply_mlm_mask_hierarchical_mode(mini_tokenizer):
 
 def test_apply_mlm_mask_skips_forbid_ids(mini_tokenizer):
     tk = mini_tokenizer
-    from transform_emr.config.dataset_config import DEATH_TOKEN
+    from intervene_enc.config.dataset_config import DEATH_TOKEN
 
     # Build a single-sequence batch containing only a forbid token (DEATH).
     death_id = tk.token2id[DEATH_TOKEN]

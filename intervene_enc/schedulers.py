@@ -7,14 +7,14 @@ Unified auxiliary loss weighting scheduler for Phase-1 (embedding) and Phase-2 (
 LRScheduleController:
     - Wraps Phase-2 OneCycleLR construction and step updates.
     - Uses `phase2_scheduler["warmup_epochs"]` when provided, otherwise
-        falls back to `phase2_scheduler["bce_only_epochs"]` for LR warmup.
+        falls back to `phase2_scheduler["main_only_epochs"]` for LR warmup.
     - Exposes `update`, `state_dict`, and `load_state_dict` for training/resume.
 
 LambdaScheduleController:
   - Accepts a phase-specific schedule config dict.
   - Defines auxiliary tasks and their curriculum via an `order` list-of-lists:
       - Each inner list is a stage of aux tasks that activate together.
-      - Stage 0 activates after a BCE-only warmup period (bce_only_epochs).
+      - Stage 0 activates after a main-loss-only warmup period (main_only_epochs).
       - Subsequent stages are unlocked dynamically when the total weighted validation
         loss plateaus — but only after the current stage's ramp has completed.
   - Frozen-fraction calibration: lambda_max = fraction_cap * tr_main / tr_aux
@@ -27,7 +27,8 @@ Config expected shape (phase-specific dict):
         "aux_fraction_caps":  {name: fraction, ...},  # required; every aux name must be present
         "order":              [[name, ...], [name, ...], ...],
         "ramp_epochs":        {name: int, ...},
-        "bce_only_epochs":    int,                    # epochs of BCE-only training before aux activates
+        "main_only_epochs":    int,                    # epochs of main-loss-only training before aux activates
+                                                       # (Phase-1 main = outcome BCE; Phase-2 main = MLM CE).
         # Multi-stage only (len(order) > 1):
         "plateau_min_delta":  float,
         "plateau_patience":   int | [int, ...],       # one per stage transition
@@ -70,7 +71,7 @@ class LRScheduleController:
 
         Builds and owns a `torch.optim.lr_scheduler.OneCycleLR` instance used
         during phase-2 training. The warmup portion is derived from
-        `training_settings["phase2_scheduler"]["warmup_epochs"]` or `training_settings["phase2_scheduler"]["bce_only_epochs"]`
+        `training_settings["phase2_scheduler"]["warmup_epochs"]` or `training_settings["phase2_scheduler"]["main_only_epochs"]`
         and converted to OneCycle's
         `pct_start` fraction.
 
@@ -93,7 +94,7 @@ class LRScheduleController:
                 `LambdaScheduleController`.
         """
         total_epochs = training_settings["phase2_n_epochs"]
-        lr_warmup_epochs = training_settings["phase2_scheduler"].get("warmup_epochs", 0) or training_settings["phase2_scheduler"].get("bce_only_epochs", 0)
+        lr_warmup_epochs = training_settings["phase2_scheduler"].get("warmup_epochs", 0) or training_settings["phase2_scheduler"].get("main_only_epochs", 0)
         pct = max(1e-6, min(0.9, lr_warmup_epochs / float(total_epochs)))
 
         base_lr = training_settings["phase2_learning_rate"]
@@ -112,7 +113,7 @@ class LRScheduleController:
             final_div_factor=10,
         )
 
-    def update(self):
+    def step(self):
         """Advance LR scheduler by one optimizer step."""
         self._scheduler.step()
 
@@ -131,9 +132,11 @@ class LambdaScheduleController:
     Unified scheduler for auxiliary loss weighting.
 
     Phase behaviour is driven purely by the `order` list:
-      - Single stage  → Phase-1 style: all aux tasks activate after bce_only_epochs, no plateau gating.
-      - Multi-stage   → Phase-2 style: stage 0 activates after bce_only_epochs; later stages unlock
+      - Single stage  → Phase-1 style: all aux tasks activate after main_only_epochs, no plateau gating.
+                        Main loss = outcome BCE.
+      - Multi-stage   → Phase-2 style: stage 0 activates after main_only_epochs; later stages unlock
                         on plateau detection of vl_total — but only after the current stage's ramp ends.
+                        Main loss = MLM cross-entropy.
 
     Usage (once per epoch, after both train and val epochs):
         msgs = controller.update(epoch, vl_total=vl_loss, tr_main=tr_bce, **tr_aux_losses)
@@ -159,15 +162,15 @@ class LambdaScheduleController:
         order = schedule_config.get("order", [])
         self._order = order
 
-        bce_only = max(1, int(schedule_config.get("bce_only_epochs", 1)))
+        main_only = max(1, int(schedule_config.get("main_only_epochs", 1)))
 
         # Register all auxiliaries.
-        # Stage 0 starts after bce_only_epochs; later stages start as None (unlocked later).
+        # Stage 0 starts after main_only_epochs; later stages start as None (unlocked later).
         # Raises KeyError immediately if any aux name is missing from aux_fraction_caps.
         self._auxiliaries = {}
         for stage_idx, stage_auxi in enumerate(order):
             if stage_idx == 0:
-                s_epoch = self.start_epoch + bce_only
+                s_epoch = self.start_epoch + main_only
             else:
                 s_epoch = None
             for name in stage_auxi:
@@ -368,7 +371,7 @@ class LambdaScheduleController:
         """
         Return current lambda values for all registered auxiliaries.
 
-        Returns 0.0 for aux tasks not yet active (before bce_only_epochs or before stage unlock)
+        Returns 0.0 for aux tasks not yet active (before main_only_epochs or before stage unlock)
         or not yet calibrated.
         """
         lambdas = {}

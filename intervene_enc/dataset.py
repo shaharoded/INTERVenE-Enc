@@ -12,8 +12,8 @@ from collections import Counter
 from typing import List
 
 # ───────── local code ─────────────────────────────────────────────────── #
-from transform_emr.config.dataset_config import *
-from transform_emr.config.model_config import CHECKPOINT_PATH
+from intervene_enc.config.dataset_config import *
+from intervene_enc.config.model_config import CHECKPOINT_PATH
 
 
 class DataProcessor:
@@ -32,7 +32,7 @@ class DataProcessor:
 
     """
     def __init__(self, df, context_df, 
-                 tak_repo_path='transform_emr/config/tak_repo.pkl', 
+                 tak_repo_path='intervene_enc/config/tak_repo.pkl', 
                  max_input_days=None, 
                  scaler=None, 
                  checkpoint_path=CHECKPOINT_PATH,
@@ -563,9 +563,9 @@ class DataProcessor:
         #      for the model to learn meaningful temporal dependencies.
         #
         # If you need to change this sorting for any reason, you MUST also update:
-        #   - emr_model/transform_emr/utils.py::get_temporal_multi_hot_targets()
-        #   - emr_model/transform_emr/embedder.py::train_embedder() BCE loss computation
-        #   - emr_model/transform_emr/transformer.py::pretrain_transformer() BCE loss computation
+        #   - intervene_enc/utils.py::get_temporal_multi_hot_targets()
+        #   - intervene_enc/embedder.py::train_embedder() BCE loss computation
+        #   - intervene_enc/transformer.py::pretrain_transformer() BCE loss computation
         #
         self.df = df.sort_values(['PatientId', 'TimePoint']).reset_index(drop=True)
     
@@ -672,8 +672,7 @@ class EMRTokenizer:
     def __init__(self, token2id, rawconcept2id, concept2id, value2id, special_tokens,
                  token_weights, outcome_weights, token_counts,
                  tokenid2parent_raw_ids, parent_pad_len,
-                 outcome_patient_ratios=None,
-                 tokenid2family_mask_id=None, family_mask_names=None):
+                 outcome_patient_ratios=None):
         self.token2id = token2id
         self.id2token = {i: tok for tok, i in token2id.items()}
         self.rawconcept2id = rawconcept2id
@@ -688,10 +687,10 @@ class EMRTokenizer:
         # Keys = valid (non-rare) outcome names; values = patient prevalence ratio.
         self.outcome_patient_ratios = outcome_patient_ratios or {}
 
-        # Validate presence of mandatory special tokens.  [MASK_INTERVAL_*] are
-        # the hierarchical interval mask tokens used by the MLM masker so the
-        # encoder can tell a masked interval endpoint apart from a masked
-        # point event without leaking the original concept identity.
+        # Validate presence of mandatory special tokens.  [MASK_INTERVAL_*]
+        # let the MLM masker preserve interval structure when an endpoint is
+        # masked (vs leaking the original concept identity through a generic
+        # [MASK]).
         required_specials = ["[PAD]", "[MASK]", "[NULL]",
                              "[MASK_INTERVAL_START]", "[MASK_INTERVAL_END]"]
         for tok in required_specials:
@@ -704,27 +703,12 @@ class EMRTokenizer:
         self.mask_interval_start_id = token2id["[MASK_INTERVAL_START]"]
         self.mask_interval_end_id = token2id["[MASK_INTERVAL_END]"]
 
-        # HEART-style family masking — see utils.apply_mlm_mask(mode=...).
-        #   tokenid2family_mask_id : Long[V]  — replacement id used for the
-        #                            non-interval, non-special token at vocab
-        #                            position v.  Special / interval tokens
-        #                            fall back to mask_token_id (they are
-        #                            forbidden from masking anyway).
-        #   family_mask_names      : List[str] — the [MASK_RAW_<family>] names
-        #                            added to the vocab; empty list when the
-        #                            tokenizer was built without family masks.
-        # Optional — older tokenizers that pre-date the family-mask feature
-        # load with these set to None; apply_mlm_mask falls back to positional
-        # masking in that case.
-        self.tokenid2family_mask_id = tokenid2family_mask_id
-        self.family_mask_names = list(family_mask_names) if family_mask_names else []
-
     @classmethod
     def from_processed_df(cls, df, special_tokens=None):
         if special_tokens is None:
-            # Defaults include the hierarchical MLM mask tokens required by the
-            # BERT-style Phase-2 masker.  Plain [MASK] handles point events;
-            # [MASK_INTERVAL_*] preserve interval structure on masked endpoints.
+            # [MASK] for point events; [MASK_INTERVAL_*] preserve interval
+            # structure on masked endpoints so the encoder still sees that an
+            # interval boundary was masked (vs leaking the original concept).
             special_tokens = [
                 "[PAD]", "[MASK]", "[NULL]",
                 "[MASK_INTERVAL_START]", "[MASK_INTERVAL_END]",
@@ -748,18 +732,6 @@ class EMRTokenizer:
                 raise ValueError(f"ParentRawConcepts must be list[str], got {type(lst)}")
             for x in lst:
                 raw_set.add(x)
-
-        # Family-mask specials — one `[MASK_RAW_<name>]` per top-level raw
-        # concept that appears in the data (excluding the bracket-wrapped
-        # specials themselves).  Order is sorted for determinism.  Adding
-        # them to `special_tokens` keeps the "specials occupy identical
-        # positions in all four vocabs" invariant that apply_mlm_mask relies
-        # on for parent_raw_ids replacement.
-        family_mask_names = sorted(
-            f"[MASK_RAW_{r}]" for r in raw_set
-            if not (r.startswith("[") and r.endswith("]"))
-        )
-        special_tokens = list(special_tokens) + family_mask_names
 
         raw_concepts = sorted(raw_set)
         concepts = sorted(df['Concept'].unique())
@@ -790,12 +762,10 @@ class EMRTokenizer:
         #   the model must learn to predict quiet periods correctly.
         # ADMISSION_TOKEN gets 0.0 — it is a sequence boundary marker, not a clinical event.
         token_weights = torch.ones(len(token2id))
-        # Mask tokens (generic + interval + family) are never valid prediction
-        # targets; zero them so the BCE-based losses ignore them entirely.
-        _zero_toks = (
-            ["[PAD]", "[MASK]", "[MASK_INTERVAL_START]", "[MASK_INTERVAL_END]", ADMISSION_TOKEN]
-            + family_mask_names
-        )
+        # Mask tokens (generic + interval) are never valid prediction targets;
+        # zero them so the BCE-based losses ignore them entirely.
+        _zero_toks = ["[PAD]", "[MASK]", "[MASK_INTERVAL_START]",
+                      "[MASK_INTERVAL_END]", ADMISSION_TOKEN]
         for ignore_tok in _zero_toks:
             tok_id = token2id.get(ignore_tok)
             if tok_id is not None:
@@ -812,7 +782,7 @@ class EMRTokenizer:
         patient_tokens = df.groupby("PatientId")["PositionToken"].apply(set)
 
         # outcome_patient_ratios: name → prevalence ratio for outcomes that meet the threshold.
-        # Keys of this dict are the canonical valid outcome list used by the GPT outcome head.
+        # Keys of this dict are the canonical valid outcome list used by the outcome head.
         # Outcomes below the threshold are dropped here, printed, and excluded from the head.
         outcome_patient_ratios = {}
         dropped_outcomes = []
@@ -896,32 +866,9 @@ class EMRTokenizer:
             ids = encode_parent_names(pos_to_parents[tok])
             lut[tid, :len(ids)] = torch.tensor(ids, dtype=torch.long)
 
-        # ---- family-mask LUT: token id → [MASK_RAW_<family>] id ----
-        # For each PositionToken pick the first sorted ParentRawConcept as the
-        # canonical family.  Special tokens (incl. the family masks themselves)
-        # fall back to the generic mask_token_id — they are forbidden from
-        # masking, so this branch is purely defensive.
-        mask_tok_id = token2id["[MASK]"]
-        family_lut = torch.full((len(token2id),), mask_tok_id, dtype=torch.long)
-        for tok, tid in token2id.items():
-            if tok in special_tokens:
-                continue
-            parents = pos_to_parents.get(tok, [])
-            # Skip non-positional tokens or special tokens that mistakenly
-            # made it here — they retain the mask_tok_id fallback.
-            if not parents:
-                continue
-            primary = sorted(parents)[0]
-            family_name = f"[MASK_RAW_{primary}]"
-            family_tid = token2id.get(family_name)
-            if family_tid is not None:
-                family_lut[tid] = family_tid
-
         return cls(token2id, rawconcept2id, concept2id, value2id, special_tokens, token_weights, outcome_weights,
                    counts_vec, lut, Pmax,
-                   outcome_patient_ratios=outcome_patient_ratios,
-                   tokenid2family_mask_id=family_lut,
-                   family_mask_names=family_mask_names)
+                   outcome_patient_ratios=outcome_patient_ratios)
 
     def save(self, path=os.path.join(CHECKPOINT_PATH, 'tokenizer.pt')):
         torch.save({
@@ -936,8 +883,6 @@ class EMRTokenizer:
             'tokenid2parent_raw_ids': self.tokenid2parent_raw_ids,
             'parent_pad_len': self.parent_pad_len,
             'outcome_patient_ratios': self.outcome_patient_ratios,
-            'tokenid2family_mask_id': self.tokenid2family_mask_id,
-            'family_mask_names': self.family_mask_names,
             'fingerprint': self.fingerprint()
         }, path)
 
@@ -947,9 +892,6 @@ class EMRTokenizer:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         obj = torch.load(path, map_location=device, weights_only=True)
 
-        _fam_lut = obj.get('tokenid2family_mask_id')
-        if _fam_lut is not None and torch.is_tensor(_fam_lut):
-            _fam_lut = _fam_lut.to(device)
         tokenizer = cls(
             token2id=obj['token2id'],
             rawconcept2id=obj['rawconcept2id'],
@@ -962,8 +904,6 @@ class EMRTokenizer:
             tokenid2parent_raw_ids=obj['tokenid2parent_raw_ids'].to(device),
             parent_pad_len=obj['parent_pad_len'],
             outcome_patient_ratios=obj.get('outcome_patient_ratios', {}),
-            tokenid2family_mask_id=_fam_lut,
-            family_mask_names=obj.get('family_mask_names'),
         )
         tokenizer._loaded_fingerprint = obj.get('fingerprint')
         return tokenizer

@@ -1,12 +1,12 @@
 from torch.utils.data import DataLoader
 import os
-from transform_emr.dataset import DataProcessor, EMRTokenizer, EMRDataset, collate_emr
+from intervene_enc.dataset import DataProcessor, EMRTokenizer, EMRDataset, collate_emr
 import pandas as pd
 import pytest
 import json
 import torch
-from transform_emr.dataset import DataProcessor
-from transform_emr.config.dataset_config import RELEASE_TOKEN, DEATH_TOKEN, ADMISSION_TOKEN
+from intervene_enc.dataset import DataProcessor
+from intervene_enc.config.dataset_config import RELEASE_TOKEN, DEATH_TOKEN, ADMISSION_TOKEN
 
 # --- Mock TAK Repo Setup (JSON format) ---
 @pytest.fixture
@@ -88,7 +88,11 @@ def base_ctx():
     return pd.DataFrame({'PatientId': [1], 'Age': [30]})
 
 @pytest.mark.order(1)
-def test_synthetic_data_pipeline(tmp_path, capsys, mock_tak_repo):
+def test_synthetic_data_pipeline(tmp_path, capsys, mock_tak_repo, monkeypatch):
+    # QA features rely on an external qa_data.csv that is not part of the
+    # synthetic test fixture — disable the augmentation for this unit test.
+    import intervene_enc.dataset as _ds
+    monkeypatch.setattr(_ds, "USE_QA_DATA", False)
     # --- create a tiny two‑patient temporal table ---
     df = pd.DataFrame({
         'PatientId':     [1, 1, 2, 2],

@@ -1,15 +1,15 @@
-"""transform_emr package exports (BERT-pivot edition)."""
+"""intervene_enc package exports (BERT-pivot edition)."""
 
-from transform_emr.dataset import (
+from intervene_enc.dataset import (
     DataProcessor, EMRDataset, EMRTokenizer, collate_emr, get_dataloader,
 )
-from transform_emr.embedder import EMREmbedding, train_embedder
-from transform_emr.inference import predict, get_token_embedding
-from transform_emr.transformer import (
-    EMREncoder, TaskHeads, PerOutcomeAttnPool,
+from intervene_enc.embedder import EMREmbedding, train_embedder
+from intervene_enc.inference import predict
+from intervene_enc.transformer import (
+    InterveneEncoder, TaskHeads, PerOutcomeAttnPool,
     pretrain_transformer, finetune_transformer,
 )
-from transform_emr.diagnose import run_diagnostics
+from intervene_enc.diagnose import run_diagnostics
 
 __all__ = [
     "EMRDataset",
@@ -19,12 +19,11 @@ __all__ = [
     "get_dataloader",
     "EMREmbedding",
     "train_embedder",
-    "EMREncoder",
+    "InterveneEncoder",
     "TaskHeads",
     "PerOutcomeAttnPool",
     "pretrain_transformer",
     "finetune_transformer",
     "predict",
-    "get_token_embedding",
     "run_diagnostics",
 ]

@@ -2,7 +2,7 @@
 diagnose.py
 ===========
 
-Post-training health checks for the BERT-pivot ``EMREncoder``.
+Post-training health checks for the BERT-pivot ``InterveneEncoder``.
 
 All probes consume a trained model + a validation DataLoader and print a short
 report; nothing here mutates the model.  Helpful when investigating why a
@@ -48,8 +48,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from transform_emr.transformer import EMREncoder
-from transform_emr.utils import apply_mlm_mask, build_luts
+from intervene_enc.transformer import InterveneEncoder
+from intervene_enc.utils import apply_mlm_mask, build_luts
 
 
 # ───────── helpers ────────────────────────────────────────────────────── #
@@ -74,8 +74,8 @@ def _percentiles(values: np.ndarray, qs=(5, 25, 50, 75, 95)) -> str:
 
 # ───────── MLM accuracy ──────────────────────────────────────────────── #
 @torch.no_grad()
-def probe_mlm_accuracy(model: EMREncoder, loader, n_batches: int = 2,
-                       p: float = 0.15, mode: str = "positional",
+def probe_mlm_accuracy(model: InterveneEncoder, loader, n_batches: int = 2,
+                       p: float = 0.15,
                        top_k: int = 5) -> dict:
     """
     Purpose: Top-1 and top-K accuracy of the MLM head on freshly-masked
@@ -101,7 +101,7 @@ def probe_mlm_accuracy(model: EMREncoder, loader, n_batches: int = 2,
         batch = _to_device(batch, device)
         batch, target_ids, mlm_mask = apply_mlm_mask(
             batch=batch, tokenizer=model.embedder.tokenizer,
-            forbid_ids=luts["forbid_mask_ids"], luts=luts, p=p, mode=mode,
+            forbid_ids=luts["forbid_mask_ids"], luts=luts, p=p,
         )
         if not mlm_mask.any():
             continue
@@ -146,8 +146,8 @@ def probe_mlm_accuracy(model: EMREncoder, loader, n_batches: int = 2,
 
 # ───────── time aux residuals ─────────────────────────────────────────── #
 @torch.no_grad()
-def probe_time_aux_residuals(model: EMREncoder, loader, n_batches: int = 2,
-                             p: float = 0.15, mode: str = "positional") -> dict:
+def probe_time_aux_residuals(model: InterveneEncoder, loader, n_batches: int = 2,
+                             p: float = 0.15) -> dict:
     """
     Purpose: Distribution of t_pos and t_local residuals on val batches.
     Method:  Re-mask each batch (same as the train loop), forward, and
@@ -158,7 +158,7 @@ def probe_time_aux_residuals(model: EMREncoder, loader, n_batches: int = 2,
     Returns:
         dict with per-aux ``mean``, ``std`` and percentile string.
     """
-    from transform_emr.transformer import _time_to_neighbour_targets
+    from intervene_enc.utils import time_to_neighbour_targets
 
     model.eval()
     device = next(model.parameters()).device
@@ -170,7 +170,7 @@ def probe_time_aux_residuals(model: EMREncoder, loader, n_batches: int = 2,
         batch = _to_device(batch, device)
         batch, _, mlm_mask = apply_mlm_mask(
             batch=batch, tokenizer=model.embedder.tokenizer,
-            forbid_ids=luts["forbid_mask_ids"], luts=luts, p=p, mode=mode,
+            forbid_ids=luts["forbid_mask_ids"], luts=luts, p=p,
         )
         _, t_pos_pred, t_local_pred, pad_mask = model(
             parent_raw_ids=batch["parent_raw_ids"], concept_ids=batch["concept_ids"],
@@ -188,7 +188,7 @@ def probe_time_aux_residuals(model: EMREncoder, loader, n_batches: int = 2,
             )
 
         # t_local only at masked positions with valid neighbours.
-        t_target, t_valid = _time_to_neighbour_targets(
+        t_target, t_valid = time_to_neighbour_targets(
             batch["abs_ts"], pad_mask, mlm_mask, max_hours=24.0,
         )
         if t_valid.any():
@@ -218,7 +218,7 @@ def probe_time_aux_residuals(model: EMREncoder, loader, n_batches: int = 2,
 
 # ───────── pool attention diagnostics ─────────────────────────────────── #
 @torch.no_grad()
-def probe_pool_attention(model: EMREncoder, loader, n_batches: int = 2) -> dict:
+def probe_pool_attention(model: InterveneEncoder, loader, n_batches: int = 2) -> dict:
     """
     Purpose: Inspect the per-outcome attention pool.
     Method:  Re-run the pool with ``need_weights=True`` on a few batches and
@@ -271,7 +271,7 @@ def probe_pool_attention(model: EMREncoder, loader, n_batches: int = 2) -> dict:
 
 # ───────── outcome logit distribution ─────────────────────────────────── #
 @torch.no_grad()
-def probe_outcome_logit_distribution(model: EMREncoder, loader,
+def probe_outcome_logit_distribution(model: InterveneEncoder, loader,
                                      n_batches: int = 2) -> dict:
     """
     Purpose: Risk-head logit distribution per outcome.
@@ -312,8 +312,8 @@ def probe_outcome_logit_distribution(model: EMREncoder, loader,
 
 # ───────── legality starvation ────────────────────────────────────────── #
 @torch.no_grad()
-def probe_legality_starvation(model: EMREncoder, loader, n_batches: int = 2,
-                              p: float = 0.15, mode: str = "positional",
+def probe_legality_starvation(model: InterveneEncoder, loader, n_batches: int = 2,
+                              p: float = 0.15,
                               ks=(1, 5, 20)) -> dict:
     """
     Purpose: Does the MLM head ever rank the GT token in the top-K?
@@ -333,7 +333,7 @@ def probe_legality_starvation(model: EMREncoder, loader, n_batches: int = 2,
         batch = _to_device(batch, device)
         batch, target_ids, mlm_mask = apply_mlm_mask(
             batch=batch, tokenizer=model.embedder.tokenizer,
-            forbid_ids=luts["forbid_mask_ids"], luts=luts, p=p, mode=mode,
+            forbid_ids=luts["forbid_mask_ids"], luts=luts, p=p,
         )
         if not mlm_mask.any():
             continue
@@ -359,8 +359,8 @@ def probe_legality_starvation(model: EMREncoder, loader, n_batches: int = 2,
 
 
 # ───────── one-shot wrapper ───────────────────────────────────────────── #
-def run_diagnostics(model: EMREncoder, loader, n_batches: int = 2,
-                    p: float = 0.15, mode: str = "positional") -> dict:
+def run_diagnostics(model: InterveneEncoder, loader, n_batches: int = 2,
+                    p: float = 0.15) -> dict:
     """
     Purpose: Run the standard suite of BERT-encoder health checks and return
              a dict aggregating their outputs.
@@ -369,17 +369,17 @@ def run_diagnostics(model: EMREncoder, loader, n_batches: int = 2,
              outcome-head / pool probes self-skip in that case.
 
     Args:
-        model     : trained EMREncoder.
+        model     : trained InterveneEncoder.
         loader    : validation DataLoader.
         n_batches : how many batches to sample per probe.
         p         : MLM ratio to re-apply for the MLM / time-aux / legality probes.
         mode      : MLM mode (positional / hierarchical) — should match training.
     """
-    print(f"\n=== run_diagnostics  n_batches={n_batches}  p={p}  mode={mode} ===")
+    print(f"\n=== run_diagnostics  n_batches={n_batches}  p={p} ===")
     report = {
-        "mlm_accuracy":            probe_mlm_accuracy(model, loader, n_batches, p, mode),
-        "time_aux_residuals":      probe_time_aux_residuals(model, loader, n_batches, p, mode),
-        "legality_starvation":     probe_legality_starvation(model, loader, n_batches, p, mode),
+        "mlm_accuracy":            probe_mlm_accuracy(model, loader, n_batches, p),
+        "time_aux_residuals":      probe_time_aux_residuals(model, loader, n_batches, p),
+        "legality_starvation":     probe_legality_starvation(model, loader, n_batches, p),
         "outcome_logit_distribution": probe_outcome_logit_distribution(model, loader, n_batches),
         "pool_attention":          probe_pool_attention(model, loader, n_batches),
     }

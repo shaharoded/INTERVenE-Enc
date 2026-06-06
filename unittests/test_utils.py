@@ -1,9 +1,9 @@
 import torch
 import torch.nn.functional as F
 import pytest
-import transform_emr.utils as utils_module
+import intervene_enc.utils as utils_module
 
-from transform_emr.utils import (
+from intervene_enc.utils import (
     get_temporal_multi_hot_targets,
     get_future_outcome_targets,
     linear_schedule,
@@ -16,9 +16,9 @@ from transform_emr.utils import (
     build_illegal_mask_batched,
     update_legality_state_batched,
 )
-from transform_emr.schedulers import LambdaScheduleController, linear_schedule as sched_linear_schedule
-from transform_emr.dataset import EMRTokenizer
-from transform_emr.utils import compute_soft_outcome_labels
+from intervene_enc.schedulers import LambdaScheduleController, linear_schedule as sched_linear_schedule
+from intervene_enc.dataset import EMRTokenizer
+from intervene_enc.utils import compute_soft_outcome_labels
 
 
 def test_linear_schedule_import_is_from_schedulers():
@@ -86,7 +86,7 @@ def test_precalibration_warmup_gate_at_start_epoch_not_plus_one():
     (BCE-only) before aux losses ever contributed to the val loss.
     """
     cfg = {
-        "bce_only_epochs": 3,
+        "main_only_epochs": 3,
         "aux_fraction_caps": {"mlm": 0.20, "dt": 0.20},
         "order": [["mlm", "dt"]],
         "ramp_epochs": {"mlm": 0, "dt": 0},

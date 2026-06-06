@@ -13,7 +13,7 @@ The results shown here (in `evaluation.ipynb`) are on random data, as my researc
 ```bash
 transform-emr/
 │
-├── transform_emr/                     # Core Python package
+├── intervene_enc/                     # Core Python package
 │   ├── config/                        # Configuration modules
 │   │   ├── __init__.py
 │   │   ├── tak-repo-portable.json     # TAKRepository object from Mediator (see related project)
@@ -22,10 +22,8 @@ transform-emr/
 │   ├── __init__.py                    
 │   ├── dataset.py                     # Dataset, DataPreprocess and Tokenizer
 │   ├── embedder.py                    # Embedding model (EMREmbedding) + training
-│   ├── transformer.py                 # Bidirectional encoder (EMREncoder) + TaskHeads + Phase-2/3 training
-│   ├── train.py                       # Full training pipeline (3-phase)
+│   ├── transformer.py                 # Bidirectional encoder (InterveneEncoder) + TaskHeads + Phase-2/3 training
 │   ├── inference.py                   # Single-pass inference (encode -> pool -> risk/time)
-│   ├── loss.py                        # Utility module for special loss criterias
 │   ├── schedulers.py                  # Utility module for training schedulers (LR & Aux tasks)
 │   └── utils.py                       # Utility functions (plots + penalties + masks + MLM masker)
 ├── data/                              # External data folder (for synthetic or real EMR)
@@ -67,9 +65,9 @@ pip install -e .
 
 ```python
 import pandas as pd
-from transform_emr.dataset import EMRDataset
-from transform_emr.config.dataset_config import *
-from transform_emr.config.model_config import *
+from intervene_enc.dataset import EMRDataset
+from intervene_enc.config.dataset_config import *
+from intervene_enc.config.model_config import *
 
 # Load data (verify you paths are properly defined)
 temporal_df = pd.read_csv(TRAIN_TEMPORAL_DATA_FILE, low_memory=False)
@@ -86,12 +84,14 @@ MODEL_CONFIG['ctx_dim'] = int(train_ds.context_df.shape[1]) # Dinamically updati
 
 ### 2. Train Model
 
+Training is orchestrated via the three phase entry-points exposed at the package level — Phase-1 trains the embedder, Phase-2 pretrains the bidirectional encoder backbone with MLM, and Phase-3 attaches `TaskHeads` and fine-tunes for per-patient risk + time-to-event. See the autoresearch repository's `api.py` for the reference training driver.
+
 ```python
-from transform_emr.train import run_training
-embedder, model_p2, model_p3, test_raw = run_training()
+from intervene_enc.embedder import train_embedder
+from intervene_enc.transformer import pretrain_transformer, finetune_transformer
 ```
 
-`run_training()` follows a strict train / val / test contract:
+The training contract:
 
 - **Three-way patient split**: train / val / test. The test split is held out and never seen during training or early-stop selection — it is consumed only by `evaluation.ipynb` for headline metrics.
 - **Scaler is fit on train** (saved to `checkpoints/scaler.pkl`) and reused on val/test.
@@ -99,7 +99,7 @@ embedder, model_p2, model_p3, test_raw = run_training()
 - **Phase 1 caching**: when `(embed_dim, time2vec_dim, ctx_dim)` match the cached Phase-1 checkpoint, the embedder is reused and Phase 1 is skipped — Phase 2/3 are always retrained on each call.
 - **DataLoaders**: Phase 1 + Phase 3 use bucket-batched natural distribution; Phase 2 uses a weighted bucket sampler so rare outcomes get balanced exposure (`pos_weight` is omitted there because the sampler already rebalances).
 
-Model checkpoints are saved under `checkpoints/phase1/`, `checkpoints/phase2/`, and `checkpoints/phase3/`. You can also call `prepare_data()` directly and run individual phases; see `train.py` for reference.
+Model checkpoints are saved under `checkpoints/phase1/`, `checkpoints/phase2/`, and `checkpoints/phase3/`. Each phase function (`train_embedder`, `pretrain_transformer`, `finetune_transformer`) can be invoked directly.
 
 ### 3. Inference and Complication Risk Prediction
 
@@ -108,11 +108,11 @@ Inference is a **single bidirectional encoder pass** per patient. No autoregress
 ```python
 import joblib
 from pathlib import Path
-from transform_emr.embedder import EMREmbedding
-from transform_emr.transformer import EMREncoder
-from transform_emr.dataset import DataProcessor, EMRTokenizer, EMRDataset
-from transform_emr.inference import predict
-from transform_emr.config.model_config import *
+from intervene_enc.embedder import EMREmbedding
+from intervene_enc.transformer import InterveneEncoder
+from intervene_enc.dataset import DataProcessor, EMRTokenizer, EMRDataset
+from intervene_enc.inference import predict
+from intervene_enc.config.model_config import *
 
 # Load tokenizer and scaler
 tokenizer = EMRTokenizer.load(Path(CHECKPOINT_PATH) / "tokenizer.pt")
@@ -128,7 +128,7 @@ embedder_model, *_ = EMREmbedding.load(PHASE1_CHECKPOINT, tokenizer=tokenizer)
 p3_ckpt = Path(PHASE3_CHECKPOINT)
 p2_ckpt = Path(PHASE2_CHECKPOINT)
 ckpt_path = p3_ckpt if p3_ckpt.exists() else p2_ckpt
-model, *_ = EMREncoder.load(ckpt_path, embedder=embedder_model, attach_task_heads=True)
+model, *_ = InterveneEncoder.load(ckpt_path, embedder=embedder_model, attach_task_heads=True)
 model.eval()
 
 # One-row-per-patient predictions: P_<outcome>, T_<outcome>
@@ -147,13 +147,9 @@ You can perform local tests (not unit-tests) by activating the `.py` files, usin
 
 For example, run this from the root:
 ```bash
-python -m transform_emr.train
+python -m intervene_enc.inference
 
-# Or
-
-python -m transform_emr.inference
-
-# Both modules have a __main__ activation to train / infer on a trained model
+# The inference module has a __main__ activation to run on a trained model
 ```
 ---
 
@@ -179,23 +175,23 @@ To package without data/checkpoints:
 
 ```powershell
 # Clean up any existing temp folder
-Remove-Item -Recurse -Force .\transform_emr_temp -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force .\intervene_enc_temp -ErrorAction SilentlyContinue
 
 # Recreate the temp folder
-New-Item -ItemType Directory -Path .\transform_emr_temp | Out-Null
+New-Item -ItemType Directory -Path .\intervene_enc_temp | Out-Null
 
 # Copy only what's needed
-Copy-Item -Path .\transform_emr -Destination .\transform_emr_temp -Recurse
-Copy-Item -Path .\setup.py, .\evaluation.ipynb, .\README.md, .\requirements.txt -Destination .\transform_emr_temp
+Copy-Item -Path .\intervene_enc -Destination .\intervene_enc_temp -Recurse
+Copy-Item -Path .\setup.py, .\evaluation.ipynb, .\README.md, .\requirements.txt -Destination .\intervene_enc_temp
 
 # Remove __pycache__ folders (platform-specific bytecode, not for distribution)
-Get-ChildItem -Path .\transform_emr_temp -Filter __pycache__ -Recurse -Directory | Remove-Item -Recurse -Force
+Get-ChildItem -Path .\intervene_enc_temp -Filter __pycache__ -Recurse -Directory | Remove-Item -Recurse -Force
 
 # Zip it
-Compress-Archive -Path .\transform_emr_temp\* -DestinationPath .\emr_model.zip -Force
+Compress-Archive -Path .\intervene_enc_temp\* -DestinationPath .\intervene_enc.zip -Force
 
 # Clean up
-Remove-Item -Recurse -Force .\transform_emr_temp
+Remove-Item -Recurse -Force .\intervene_enc_temp
 ```
 
 ---
@@ -277,7 +273,7 @@ The training uses next-token prediction loss (temporal-window BCE) + time-delta 
 
 | Component           | Role                                                                                              |
 |--------------------|---------------------------------------------------------------------------------------------------|
-| `EMREncoder`               | Bidirectional Transformer encoder over the learned embeddings. MLM head (full-vocab logits) + two time-aware auxiliary heads (time-since-admission, time-to-neighbour). Model inputs a trained embedder. |
+| `InterveneEncoder`               | Bidirectional Transformer encoder over the learned embeddings. MLM head (full-vocab logits) + two time-aware auxiliary heads (time-since-admission, time-to-neighbour). Model inputs a trained embedder. |
 | `BidirectionalSelfAttention` | Multi-head bidirectional self-attention with temporal RoPE — every position attends to every non-pad position. |
 | `MLP` | SwiGLU MLP (SiLU Gating), kept from the AR backbone for parameter parity.                                 |
 | `AdaLNBlock` | Encoder block with AdaLN-Zero conditioning on patient context. Attention is bidirectional (no causal mask). |

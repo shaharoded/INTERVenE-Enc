@@ -14,24 +14,21 @@ which the evaluation notebook scores with the existing
 ``per_patient_max_auc`` / ``length_of_stay_mae`` framework.
 """
 
-from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from transform_emr.dataset import EMRDataset, collate_emr
-from transform_emr.transformer import EMREncoder
-from transform_emr.config.dataset_config import RELEASE_TOKEN, DEATH_TOKEN
+from intervene_enc.dataset import EMRDataset, collate_emr
+from intervene_enc.transformer import InterveneEncoder
+from intervene_enc.config.dataset_config import RELEASE_TOKEN, DEATH_TOKEN
 
 
 @torch.no_grad()
-def predict(model: EMREncoder, dataset: EMRDataset, batch_size: int = 16,
-            num_workers: int = 0, device: Optional[torch.device] = None,
-            include_pad_for_release: bool = True) -> pd.DataFrame:
+def predict(model: InterveneEncoder, dataset: EMRDataset, batch_size: int = 16,
+            num_workers: int = 0, device: Optional[torch.device] = None) -> pd.DataFrame:
     """
     Purpose: Run the encoder + task heads on every patient and return a tidy
              one-row-per-patient dataframe.
@@ -42,15 +39,12 @@ def predict(model: EMREncoder, dataset: EMRDataset, batch_size: int = 16,
              present in ``T_*`` as the length-of-stay regression.
 
     Args:
-        model           (EMREncoder): Phase-3 (or later) trained model with
-                                      task heads attached.
-        dataset         (EMRDataset): pre-truncated input dataset.
-        batch_size      (int):        loader batch size.
-        num_workers     (int):        loader workers (0 = main thread).
-        device          (torch.device|None): defaults to the model's device.
-        include_pad_for_release (bool): kept for forward compatibility — has
-                                        no effect in the current bidirectional
-                                        flow (no AR padding semantics).
+        model       (InterveneEncoder): Phase-3 (or later) trained model with
+                                  task heads attached.
+        dataset     (EMRDataset): pre-truncated input dataset.
+        batch_size  (int):        loader batch size.
+        num_workers (int):        loader workers (0 = main thread).
+        device      (torch.device|None): defaults to the model's device.
 
     Returns:
         DataFrame indexed by PatientId with columns:
@@ -59,7 +53,7 @@ def predict(model: EMREncoder, dataset: EMRDataset, batch_size: int = 16,
     """
     if model.task_heads is None:
         raise RuntimeError(
-            "[inference.predict] EMREncoder has no task_heads attached. "
+            "[inference.predict] InterveneEncoder has no task_heads attached. "
             "Load a Phase-3 checkpoint or call model.attach_task_heads()."
         )
 
@@ -77,7 +71,6 @@ def predict(model: EMREncoder, dataset: EMRDataset, batch_size: int = 16,
     risk_names = [model.outcome_names[i] for i in risk_idx]
     time_names = [model.outcome_names[i] for i in time_idx]
 
-    pid_rows = []
     risk_chunks = []
     time_chunks = []
 
@@ -97,7 +90,6 @@ def predict(model: EMREncoder, dataset: EMRDataset, batch_size: int = 16,
         )
         risk_chunks.append(torch.sigmoid(risk_logits).cpu())
         time_chunks.append(time_pred.cpu())
-        pid_rows.append(len(risk_logits))
 
     risk_mat = torch.cat(risk_chunks, dim=0).numpy()
     time_mat = torch.cat(time_chunks, dim=0).numpy()
@@ -114,56 +106,3 @@ def predict(model: EMREncoder, dataset: EMRDataset, batch_size: int = 16,
         out[f"P_{RELEASE_TOKEN}"] = 1.0 - out[f"P_{DEATH_TOKEN}"]
 
     return out
-
-
-def get_token_embedding(embedder, token: str) -> torch.Tensor:
-    """
-    Purpose: Return the row of the position embedding table for a single token.
-    Method:  Maps the token to its position id and indexes ``position_embed``.
-
-    Args:
-        embedder (EMREmbedding): trained embedder.
-        token (str): token string (must be present in tokenizer.token2id).
-
-    Returns:
-        Tensor of shape [embed_dim] on the embedder's device.
-    """
-    tid = embedder.tokenizer.token2id.get(token)
-    if tid is None:
-        raise KeyError(f"[get_token_embedding] Token '{token}' missing from vocab.")
-    with torch.no_grad():
-        return embedder.position_embed.weight[tid].detach().clone()
-
-
-if __name__ == "__main__":
-    # Smoke-run helper: load best checkpoints and dump predictions for the
-    # test split.  Mirrors the AR module's old __main__ section.
-    import joblib
-    from transform_emr.embedder import EMREmbedding
-    from transform_emr.dataset import DataProcessor, EMRTokenizer
-    from transform_emr.config.model_config import (
-        PHASE1_CHECKPOINT, PHASE2_CHECKPOINT, PHASE3_CHECKPOINT, CHECKPOINT_PATH,
-    )
-    from transform_emr.config.dataset_config import (
-        TEST_TEMPORAL_DATA_FILE, TEST_CTX_DATA_FILE, TAK_REPO_PATH,
-    )
-
-    tokenizer = EMRTokenizer.load(str(Path(CHECKPOINT_PATH) / "tokenizer.pt"))
-    scaler = joblib.load(str(Path(CHECKPOINT_PATH) / "scaler.pkl"))
-
-    df = pd.read_csv(TEST_TEMPORAL_DATA_FILE, low_memory=False)
-    ctx_df = pd.read_csv(TEST_CTX_DATA_FILE)
-    processor = DataProcessor(df, ctx_df, scaler=scaler, tak_repo_path=TAK_REPO_PATH,
-                              max_input_days=5)
-    df, ctx_df = processor.run()
-    ds = EMRDataset(df, ctx_df, tokenizer=tokenizer)
-
-    embedder, *_ = EMREmbedding.load(PHASE1_CHECKPOINT, tokenizer=tokenizer)
-    p3_ckpt = Path(PHASE3_CHECKPOINT)
-    p2_ckpt = Path(PHASE2_CHECKPOINT)
-    ckpt = p3_ckpt if p3_ckpt.exists() else p2_ckpt
-    model, *_ = EMREncoder.load(str(ckpt), embedder=embedder, attach_task_heads=True)
-    model.eval()
-
-    preds = predict(model, ds)
-    print(preds.head())
