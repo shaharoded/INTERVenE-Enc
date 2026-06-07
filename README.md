@@ -6,6 +6,8 @@ This repository implements a three-phase deep learning pipeline for modeling lon
 
 > **BERT-pivot, 2026-06.** The original autoregressive (GPT-style) backbone in this repo was replaced with a BERT-style encoder. The AR results that motivated the pivot still appear in the thesis but live in a separate repository.
 
+> **Branches.** `main` carries the canonical research codebase used in the thesis. `autoresearcher-updates` carries an adaptation of [Karpathy's autoresearch methodology](https://github.com/karpathy/autoresearch) — an agent-friendly `api.py` contract plus a custom research skill specialised for this architecture — used to drive autonomous hyperparameter/architecture sweeps against the same model surface.
+
 <img src="images\Model Sceme.png" width="100%">
 
 This repo is part of an unpublished thesis and will be finalized post-submission. **Please do not reuse without permission**.
