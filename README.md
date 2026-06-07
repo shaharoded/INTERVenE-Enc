@@ -2,7 +2,7 @@
 
 This repository implements a three-phase deep learning pipeline for modeling longitudinal Electronic Medical Records (EMRs). The architecture combines temporal embeddings, patient context, and a **bidirectional Transformer encoder** trained with masked language modelling to read per-outcome complication risk and time-to-event predictions from learnable outcome queries.
 
-> **BERT-pivot, 2026-06.** The original autoregressive (GPT-style) backbone in this repo was replaced with a BERT-style encoder. The AR results that motivated the pivot still appear in the thesis but live in a separate repository. See `PROPOSAL_BERT_PIVOT.md` for the full motivation, and `EXPERIMENTS.md` for the architectural-search knobs that are wired in but not yet swept.
+> **BERT-pivot, 2026-06.** The original autoregressive (GPT-style) backbone in this repo was replaced with a BERT-style encoder. The AR results that motivated the pivot still appear in the thesis but live in a separate repository.
 
 <img src="images\Model Sceme.png" width="100%">
 
@@ -11,7 +11,7 @@ This repo is part of an unpublished thesis and will be finalized post-submission
 The results shown here (in `evaluation.ipynb`) are on random data, as my research dataset is private. This model will be used on actual EMR data, stored in a closed environment. For that, it is organized as a package that can be installed:
 
 ```bash
-transform-emr/
+root/
 │
 ├── intervene_enc/                     # Core Python package
 │   ├── config/                        # Configuration modules
