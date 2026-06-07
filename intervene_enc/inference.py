@@ -106,3 +106,60 @@ def predict(model: InterveneEncoder, dataset: EMRDataset, batch_size: int = 16,
         out[f"P_{RELEASE_TOKEN}"] = 1.0 - out[f"P_{DEATH_TOKEN}"]
 
     return out
+
+
+if __name__ == "__main__":
+    import random
+    import joblib
+    from pathlib import Path
+    from intervene_enc.embedder import EMREmbedding
+    from intervene_enc.dataset import DataProcessor
+    from intervene_enc.config.model_config import (
+        CHECKPOINT_PATH, PHASE1_CHECKPOINT, PHASE2_CHECKPOINT, PHASE3_CHECKPOINT,
+    )
+    from intervene_enc.config.dataset_config import (
+        TEST_TEMPORAL_DATA_FILE, TEST_CTX_DATA_FILE, TAK_REPO_PATH,
+    )
+
+    print("Loading dataset...")
+    df = pd.read_csv(TEST_TEMPORAL_DATA_FILE, low_memory=False)
+    ctx_df = pd.read_csv(TEST_CTX_DATA_FILE)
+
+    # Subset: pick N random patients for this inference batch
+    print("Getting subset...")
+    patient_ids = df["PatientID"].unique()
+    N = 10
+    selected_ids = sorted(random.sample(list(patient_ids), N))
+    df_subset  = df[df["PatientID"].isin(selected_ids)].copy()
+    ctx_subset = ctx_df.loc[selected_ids].copy()
+
+    print("Loading resources...")
+    tokenizer = EMRTokenizer.load(Path(CHECKPOINT_PATH) / "tokenizer.pt")
+    scaler    = joblib.load(Path(CHECKPOINT_PATH) / "scaler.pkl")
+
+    # Truncate to the same input window used during Phase-3 alignment so the
+    # encoder sees a seed comparable to training time, not the full GT trajectory.
+    print("Building input dataset...")
+    processor = DataProcessor(
+        df_subset.copy(), ctx_subset.copy(),
+        scaler=scaler, tak_repo_path=TAK_REPO_PATH, max_input_days=5,
+    )
+    df_input, ctx_input = processor.run()
+    dataset = EMRDataset(df_input, ctx_input, tokenizer=tokenizer)
+
+    # Prefer Phase-3 (has task heads); fall back to Phase-2 with heads attached fresh.
+    print("Loading model and running inference...")
+    embedder, *_ = EMREmbedding.load(PHASE1_CHECKPOINT, tokenizer=tokenizer)
+    p3_ckpt = Path(PHASE3_CHECKPOINT)
+    p2_ckpt = Path(PHASE2_CHECKPOINT)
+    ckpt_path = p3_ckpt if p3_ckpt.exists() else p2_ckpt
+    model, *_ = InterveneEncoder.load(
+        str(ckpt_path), embedder=embedder, attach_task_heads=True,
+    )
+    model.eval()
+
+    predictions = predict(model, dataset)
+
+    output_path = Path(CHECKPOINT_PATH) / "inference_results.xlsx"
+    predictions.to_excel(output_path, sheet_name="Predictions")
+    print(f"Inference results saved to: {output_path}")

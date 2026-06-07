@@ -1,4 +1,6 @@
-# Event Prediction in EMRs
+# INTERVenE-enc — Bidirectional EMR Encoder for Joint Risk + Time-to-Event Prediction
+
+**INTERVenE** (**INTERV**al-based **E**MR transformer) is a model family for outcome prediction from temporal abstractions. The family has two variants — **INTERVenE-ar** (autoregressive trajectory generation) and **INTERVenE-enc** (bidirectional encoder for joint risk + time-to-event prediction) — sharing a common backbone of hierarchical interval tokens, temporal RoPE, and AdaLN-Zero patient conditioning. This repository hosts the **INTERVenE-enc** variant.
 
 This repository implements a three-phase deep learning pipeline for modeling longitudinal Electronic Medical Records (EMRs). The architecture combines temporal embeddings, patient context, and a **bidirectional Transformer encoder** trained with masked language modelling to read per-outcome complication risk and time-to-event predictions from learnable outcome queries.
 
@@ -78,7 +80,7 @@ processor = DataProcessor(temporal_df, ctx_df, tak_repo_path=TAK_REPO_PATH, scal
 temporal_df, ctx_df = processor.run()
 
 tokenizer = EMRTokenizer.from_processed_df(temporal_df)
-train_ds = EMRDataset(train_df, train_ctx, tokenizer=tokenizer)
+train_ds = EMRDataset(temporal_df, ctx_df, tokenizer=tokenizer)
 MODEL_CONFIG['ctx_dim'] = int(train_ds.context_df.shape[1]) # Dinamically updating shape
 ```
 
@@ -205,6 +207,7 @@ Remove-Item -Recurse -Force .\intervene_enc_temp
 
 ## 🔄 End-to-End Workflow
 
+```text
 Raw EMR Tables
 │
 ▼
@@ -224,6 +227,7 @@ Per-patient Event Tokenization (with normalized absolute timestamps)
 │
 ▼
 → Read per-patient complication risk + length-of-stay from a single encoder pass (`evaluation.ipynb`).
+```
 
 ---
 
@@ -256,10 +260,10 @@ Medical data varies in density and structure across patients. This dynamic prepr
 ⚙️ **Phase 1: Learning Events Representation**  
 Phase 1 learns a robust, patient-aware representation of their event sequences. It isolates the core structure of patient timelines without being confounded by the autoregressive depth of Transformers.
 The embedder uses:
-- 4 levels of tokens - The event token is seperated to 4 hierarichal components to impose similarity between tokens of the same domain: `GLUCOSE` -> `GLUCOSE_TREND` -> `GLUCOSE_TREND_Inc` -> `GLUCOSE_TREND_Inc_START`
+- 4 levels of token components - The event token is split into 4 hierarchical components to impose similarity between tokens of the same domain: `GLUCOSE` -> `GLUCOSE_TREND` -> `GLUCOSE_TREND_Inc` -> `GLUCOSE_TREND_Inc_START`
 - 1 level of time - ABS T from ADMISSION, to understand global patterns and relationships between non sequential events.
 
-This architecture constructs event representations by concatenating five hierarchical levels: Raw Concept, Concept, Value, Position, and Absolute Time. This creates a dense vector that captures the intrinsic hierarchy of medical concepts (e.g., Glucose_High is a child of Glucose) while explicitly binding them to their timestamp.
+This architecture constructs event representations by concatenating these five hierarchical levels: Raw Concept, Concept, Value, Position, and Absolute Time. This creates a dense vector that captures the intrinsic hierarchy of medical concepts (e.g., Glucose_High is a child of Glucose) while explicitly binding them to their timestamp.
 
 We choose concatenation (Early Fusion) for the temporal component-unlike the standard additive approach to preserve the integrity of the medical signal. By keeping the time dimensions separate from the concept dimensions in the input, the model can clearly distinguish the "what" from the "when". This ensures that the core identity of a pathology (e.g., Hyperglycemia) remains stable and recognizable ("Hyperglycemia is Hyperglycemia") regardless of its timing, while allowing the projection layer to learn how time modifies its clinical significance (e.g., Morning vs. Evening).
 
@@ -306,7 +310,6 @@ Phase 3 attaches `TaskHeads` on top of the Phase-2-best encoder and trains:
 | Component           | Role                                                                                              |
 |--------------------|---------------------------------------------------------------------------------------------------|
 | `predict()` | **Primary inference function.** Runs a single bidirectional encoder pass over each patient and returns a DataFrame indexed by `PatientId` with `P_<outcome>` (sigmoid of risk-head logit) and `T_<outcome>` (softplus of time-head output, hours). When DEATH is present in the risk head, `P_RELEASE_EVENT` is added as `1 − P(DEATH)`. |
-| `get_token_embedding()` | Returns the embedding vector of a specific token from a trained embedder. |
 
 NOTE: Inference is a single forward pass per patient — substantially faster than the AR pipeline that preceded this version. No KV cache, no trajectory generation, no terminal-token forcing.
 
