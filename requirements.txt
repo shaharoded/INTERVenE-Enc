@@ -7,3 +7,4 @@ tqdm
 pytest
 pytest-order
 openpyxl
+joblib

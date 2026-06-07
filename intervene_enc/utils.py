@@ -6,6 +6,7 @@ General util functions for the package
 """
 import sys
 import os
+import tempfile
 import datetime
 import functools
 import inspect
@@ -75,11 +76,13 @@ def _ensure_tee_active():
     global _active_tee
     if _active_tee is not None:
         return
-    # Tee log goes to /tmp (local fs) — the workspace mfs has intermittent OSError [Errno 5]
-    # that crashes training mid-run. stdout redirect to /tmp/run.log already captures everything.
-    # Per-uid filename so a stale root-owned /tmp/training.log from a prior run does not
-    # block this process with PermissionError.
-    log_path = f"/tmp/training_{os.getuid()}.log"
+    # Tee log goes to the system temp dir (local fs) — the workspace mfs has intermittent
+    # OSError [Errno 5] that crashes training mid-run. stdout redirect already captures everything.
+    # Per-uid filename so a stale root-owned training.log from a prior run on a shared Linux pod
+    # does not block this process with PermissionError. getuid is POSIX-only — fall back to pid
+    # on Windows so local validation runs.
+    _uid = os.getuid() if hasattr(os, "getuid") else os.getpid()
+    log_path = os.path.join(tempfile.gettempdir(), f"training_{_uid}.log")
     _active_tee = _TeeStream(log_path, sys.stdout)
     sys.stdout = _active_tee
     print(f"[Logger] Logging to: {log_path}")

@@ -390,6 +390,14 @@ if _cached_ckpt.exists():
         print(f"[Phase 1]: Could not load cached embedder ({e}), retraining.")
 
 if not _embedder_reused:
+    # Wipe stale phase1 checkpoints before retraining so a short run that never
+    # beats the warmup gate cannot leave an old ckpt_best.pt with a different
+    # embed_dim behind — the final-eval reload would otherwise assertion-fail
+    # with a dim mismatch against the freshly trained P2/P3 cfg.
+    _p1_dir = Path(EMBEDDER_CHECKPOINT).parent
+    if _p1_dir.exists():
+        shutil.rmtree(_p1_dir)
+    _p1_dir.mkdir(parents=True, exist_ok=True)
     embedder = EMREmbedding(
         tokenizer    = tokenizer,
         ctx_dim      = MODEL_CONFIG["ctx_dim"],
