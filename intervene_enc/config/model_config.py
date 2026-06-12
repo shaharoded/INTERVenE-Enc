@@ -119,8 +119,24 @@ TRAINING_SETTINGS = {
     # ("aux_fraction_caps": {"t_pos": …, "t_local": …}) — see above.
 
     # --- Phase-3 settings ---
-    # Per-outcome time MAE is part of the headline; weight the smooth-L1 high
-    # enough that it keeps pace with the risk BCE.
-    "phase3_time_lambda": 0.02,
+    # phase3_time_lambda — weight of the per-outcome z-MSE time loss vs the
+    # multi-label BCE risk loss. 0.5 keeps the time head on near-equal
+    # footing with risk (matches STraTS / GRU-D's LoS-loss weight).
+    "phase3_time_lambda": 0.5,
     "phase3_head_hidden": 256,
+    # phase3_focal_gamma — focal-BCE on the risk head: loss is multiplied
+    # by (1 − p_t)^γ, downweighting easy / confident examples so rare
+    # positives (DEATH, SEVERE_HYPOGLYCEMIA) drive a larger share of the
+    # gradient. 0 = plain BCE. 2.0 is the Lin et al. default.
+    "phase3_focal_gamma": 2.0,
+    # phase3_cbm_p — Curriculum-by-Masking input-token replacement during
+    # Phase-3 training. Masks `p` fraction of non-special positions with
+    # [MASK] (BERT-style), targets/labels computed from the un-noised
+    # batch. Forces the model to use multi-source signal, helps rare
+    # outcomes. 0 disables.
+    "phase3_cbm_p": 0.25,
+    # phase3_pool_dropout — dropout inside the Phase-3 attention pool +
+    # shared MLP. ``None`` inherits the backbone's MODEL_CONFIG["dropout"].
+    # 0.20 matches STraTS's attention_dropout.
+    "phase3_pool_dropout": 0.20,
 }

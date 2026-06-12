@@ -32,6 +32,12 @@ The standard set is:
                                            top-K.  Diagnoses whether the
                                            encoder even considers the right
                                            class.
+* :func:`probe_time_head_predictions`    — Phase-3 sanity: per-outcome
+                                           ``time_head`` prediction
+                                           distribution + MAE vs the
+                                           constant-GT-median baseline.
+                                           Flags collapsed / trivial
+                                           time predictions.
 * :func:`run_diagnostics`                — convenience wrapper that runs all
                                            of the above and prints a summary.
 
@@ -358,6 +364,133 @@ def probe_legality_starvation(model: InterveneEncoder, loader, n_batches: int = 
     return out
 
 
+# ───────── Phase-3 time-head check ────────────────────────────────────── #
+@torch.no_grad()
+def probe_time_head_predictions(model: InterveneEncoder, loader,
+                                n_batches: int = 4,
+                                std_warn_hours: float = 0.5) -> dict:
+    """
+    Purpose: Verify that the Phase-3 ``time_head`` produces non-trivial
+             per-outcome time predictions — i.e., not a constant, and at least
+             as good as the constant-GT-median baseline used by ``evaluation.py``.
+
+    Method:  Run ``model.predict`` in eval mode on ``n_batches`` validation
+             batches.  For each outcome that has a time head
+             (``model.task_heads.time_idx``), collect:
+               * the distribution of predicted hours (mean / std / percentiles)
+                 over all patients in the batch — catches collapse to a single
+                 number;
+               * the model MAE on positive (label==1) entries and the matching
+                 constant-baseline MAE (predict the median GT time among the
+                 sampled positives).  ``lift = baseline − model``, with the
+                 same sign convention as the evaluator: positive ⇒ beats the
+                 constant predictor.
+
+    Warns when:
+        * the per-outcome prediction std (over all patients) is below
+          ``std_warn_hours`` ⇒ the head is essentially a constant;
+        * the lift ≤ 0 ⇒ the head matches or loses to the constant predictor.
+
+    Returns:
+        ``{outcome_name: {n_pos, pred_mean, pred_std, pred_percentiles,
+                          model_mae, baseline_mae, lift}}``.
+    """
+    if model.task_heads is None:
+        print("[probe_time_head_predictions] No task_heads attached — skipping.")
+        return {}
+
+    # Late imports to avoid a circular dependency with utils.build_patient_labels
+    # (utils → transformer → diagnose → utils).
+    from intervene_enc.utils import build_patient_labels
+    from intervene_enc.config.model_config import TRAINING_SETTINGS
+
+    model.eval()
+    device = next(model.parameters()).device
+
+    time_idx = model.task_heads.time_idx.detach().cpu().tolist()
+    outcome_names = list(model.outcome_names)
+
+    # Per-outcome accumulators.
+    all_preds  = {k: [] for k in time_idx}
+    pos_preds  = {k: [] for k in time_idx}
+    pos_gts    = {k: [] for k in time_idx}
+
+    for batch in _take_n(loader, n_batches):
+        batch = _to_device(batch, device)
+        labels, gt_time, _present = build_patient_labels(
+            model, batch, TRAINING_SETTINGS, device,
+        )
+        _, time_pred, _, _ = model.predict(
+            parent_raw_ids=batch["parent_raw_ids"],
+            concept_ids=batch["concept_ids"],
+            value_ids=batch["value_ids"],
+            position_ids=batch["position_ids"],
+            abs_ts=batch["abs_ts"],
+            context_vec=batch["context_vec"],
+        )
+        time_pred = time_pred.float().cpu().numpy()      # [B, K_time]
+        labels_np = labels.cpu().numpy()                  # [B, K_all]
+        gt_np     = gt_time.float().cpu().numpy()         # [B, K_all]
+
+        for j, k in enumerate(time_idx):
+            all_preds[k].append(time_pred[:, j])
+            pos_mask = (labels_np[:, k] == 1) & np.isfinite(gt_np[:, k])
+            if pos_mask.any():
+                pos_preds[k].append(time_pred[pos_mask, j])
+                pos_gts[k].append(gt_np[pos_mask, k])
+
+    report = {}
+    flagged_constant = []
+    flagged_no_lift  = []
+    print("[probe_time_head_predictions] per-outcome time head check")
+    print(f"  {'outcome':<32s}  {'n_pos':>5s}  {'pred_mean':>9s}  "
+          f"{'pred_std':>8s}  {'p5':>6s}  {'p50':>6s}  {'p95':>6s}  "
+          f"{'model_mae':>9s}  {'baseline':>8s}  {'lift':>7s}")
+    for k in time_idx:
+        name = outcome_names[k]
+        preds_all = np.concatenate(all_preds[k]) if all_preds[k] else np.array([])
+        preds_pos = np.concatenate(pos_preds[k]) if pos_preds[k] else np.array([])
+        gts_pos   = np.concatenate(pos_gts[k])   if pos_gts[k]   else np.array([])
+
+        pred_mean = float(preds_all.mean()) if preds_all.size else float("nan")
+        pred_std  = float(preds_all.std())  if preds_all.size else float("nan")
+        pcts = np.percentile(preds_all, [5, 50, 95]).tolist() if preds_all.size else [float("nan")] * 3
+
+        if preds_pos.size:
+            model_mae    = float(np.mean(np.abs(preds_pos - gts_pos)))
+            baseline_mae = float(np.mean(np.abs(gts_pos - np.median(gts_pos))))
+            lift         = baseline_mae - model_mae
+        else:
+            model_mae = baseline_mae = lift = float("nan")
+
+        out = {
+            "n_pos":            int(preds_pos.size),
+            "pred_mean":        pred_mean,
+            "pred_std":         pred_std,
+            "pred_percentiles": pcts,
+            "model_mae":        model_mae,
+            "baseline_mae":     baseline_mae,
+            "lift":             lift,
+        }
+        report[name] = out
+        print(f"  {name:<32s}  {out['n_pos']:>5d}  "
+              f"{pred_mean:>9.2f}  {pred_std:>8.2f}  "
+              f"{pcts[0]:>6.1f}  {pcts[1]:>6.1f}  {pcts[2]:>6.1f}  "
+              f"{model_mae:>9.2f}  {baseline_mae:>8.2f}  {lift:>+7.2f}")
+        if preds_all.size and pred_std < std_warn_hours:
+            flagged_constant.append(name)
+        if not math.isnan(lift) and lift <= 0:
+            flagged_no_lift.append(name)
+
+    if flagged_constant:
+        print(f"  WARN: near-constant time predictions for {flagged_constant} "
+              f"(pred_std < {std_warn_hours} h).")
+    if flagged_no_lift:
+        print(f"  WARN: time head does not beat constant predictor for "
+              f"{flagged_no_lift} (lift ≤ 0).")
+    return report
+
+
 # ───────── one-shot wrapper ───────────────────────────────────────────── #
 def run_diagnostics(model: InterveneEncoder, loader, n_batches: int = 2,
                     p: float = 0.15) -> dict:
@@ -366,7 +499,7 @@ def run_diagnostics(model: InterveneEncoder, loader, n_batches: int = 2,
              a dict aggregating their outputs.
     Method:  Calls each probe with the provided loader and prints results to
              stdout.  Safe to call after Phase 2 (no task heads) — the
-             outcome-head / pool probes self-skip in that case.
+             outcome-head / pool / time-head probes self-skip in that case.
 
     Args:
         model     : trained InterveneEncoder.
@@ -382,6 +515,8 @@ def run_diagnostics(model: InterveneEncoder, loader, n_batches: int = 2,
         "legality_starvation":     probe_legality_starvation(model, loader, n_batches, p),
         "outcome_logit_distribution": probe_outcome_logit_distribution(model, loader, n_batches),
         "pool_attention":          probe_pool_attention(model, loader, n_batches),
+        "time_head_predictions":   probe_time_head_predictions(
+                                       model, loader, n_batches=max(n_batches, 4)),
     }
     print("=== end run_diagnostics ===\n")
     return report
