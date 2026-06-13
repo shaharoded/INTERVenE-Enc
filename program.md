@@ -198,13 +198,14 @@ original TAK input, so Exp E is a **single retrain** of the same
 architecture + recipe on the std-binned input and a direct comparison
 against the Exp-D winner — no separate baseline arm needed.
 
-**Local preprocessing script** — will be created at
-`ablation/preprocess_std_bins.py` **before Exp E runs** (the human will hand
-off the script and the resulting `temporal_data.csv` together). The script
-runs on the developer's local machine and the std-binned CSV is scp'd to
-the pod. Until then, the agent should treat Exp E as a parked deliverable
-and not attempt to write the script or run the ablation. Specification (for
-record-keeping; the script will conform):
+**Local preprocessing script** — `ablation/preprocess_std_bins.py` is now
+in the repo. It runs on the developer's local machine (it depends on
+`med-transformers-baseline/scripts/preprocess_mimic_iv.py` for the
+Mediator-exact synthesis rules, imported via `sys.path`; the two repos
+must sit side-by-side under `Personal/`). The std-binned output CSV is
+scp'd to the pod by the human together with this commit. **The agent does
+not write or modify the script.** Specification (the script conforms;
+this stays here for record-keeping):
 
 1. **Inputs**: `data/source/mimic-iv-input-data.csv` (raw measurements,
    STraTS-style; this file lives **only locally** — it is not part of the
@@ -252,11 +253,24 @@ record-keeping; the script will conform):
 
 | Tag | Config |
 |---|---|
-| `E_std_bins` | Exp-D winner architecture + Exp-A recipe, retrained Phase-1/2/3 on the std-binned `temporal_data.csv`. |
+| `E_std_bins` | Exp-D winner architecture + Exp-A recipe, retrained **from scratch** Phase-1 → Phase-2 → Phase-3 on the std-binned `temporal_data.csv`. |
 
-Report parameter count alongside the headline metrics — the std-bins vocab
-will differ from TAK's after the `<concept>_STD_<bin>` expansion, so the
-total param count will differ too and should be documented.
+**Full retrain required, no cached re-use.** The std-bins vocabulary is
+different from the TAK vocabulary (each measurement concept expands into
+its seven `_STD_<bin>` variants — the locally-validated script produced
+204 unique token names vs the TAK file's ~73), so the tokenizer changes,
+the scaler changes, and Phase-1 / Phase-2 / Phase-3 must all be retrained
+end-to-end. Before launching the run, pre-clear the cache:
+
+```bash
+rm -f checkpoints/tokenizer.pt checkpoints/scaler.pkl \
+      checkpoints/processed_datasets.pt
+rm -rf checkpoints/phase1 checkpoints/phase2 checkpoints/phase3
+```
+
+Report the exact parameter count alongside the headline metrics — the
+embedder's `variable_emb` grows with the vocab size, so the total param
+count will differ from the Exp-D winner's.
 
 **What it answers.** If `E_std_bins` lands within 0.010 weighted AUPRC of
 the Exp-D winner and DEATH AUPRC isn't worse by > 0.01, the encoder's gains

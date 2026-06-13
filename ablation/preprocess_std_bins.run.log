@@ -1,0 +1,62 @@
+[load] reading C:\Users\shaha\Work\Personal\med-transformers-baseline\data\mimic-iv-input-data.csv ...
+[load] 21,425,419 temporal rows, 57,078 patients.
+[bounds] applying Mediator glucose / creatinine bounds...
+[bounds] glucose: dropped 109 out-of-range rows (of 1,098,049 matched).
+[bounds] creatinine: dropped 65 out-of-range rows (of 485,371 matched).
+[admission] computing minute offsets, dropping pre-admission rows...
+[outcomes] synthesising Mediator HYPER/HYPO/SEVERE/KIDNEY events...
+[outcomes] 302,413 synthesised rows.
+[rename] renaming raw outcome / admission rows to canonical names...
+[rename] DEATH_EVENT                          <-  7247 raw rows
+[rename] CARDIO-VASCULAR_DISORDER_EVENT       <-  3243 raw rows
+[rename] HYPEROSMOLALITY_EVENT                <-   155 raw rows
+[rename] KETOACIDOSIS_EVENT                   <-   343 raw rows
+[rename] ACIDOSIS_EVENT                       <-   421 raw rows
+[rename] ADMISSION_EVENT                      <- 57078 raw rows
+[rename] RELEASE_EVENT                        <- 49831 raw rows
+[binning] std-binning numeric-Value rows; categorical rows pass through...
+[collapse] merging consecutive intervals within 24 h ...
+
+[validate] ============================================================
+[validate] rows pre-collapse:  21,727,658
+[validate] rows post-collapse: 5,272,825  (reduction: 75.7%)
+
+[validate] per-outcome positive-patient prevalence (over all patients in the output):
+[validate]   ACIDOSIS_EVENT                        n_pos_patients=  266  prevalence=0.466%
+[validate]   ACUTE_RESPIRATORY_DISORDER_EVENT      n_pos_patients=    0  prevalence=0.000%
+[validate]   CARDIO-VASCULAR_DISORDER_EVENT        n_pos_patients= 3243  prevalence=5.682%
+[validate]   DEATH_EVENT                           n_pos_patients= 7247  prevalence=12.697%
+[validate]   DIABETIC_COMA_EVENT                   n_pos_patients=    0  prevalence=0.000%
+[validate]   HYPERGLYCEMIA_EVENT                   n_pos_patients=21797  prevalence=38.188%
+[validate]   HYPEROSMOLALITY_EVENT                 n_pos_patients=  122  prevalence=0.214%
+[validate]   HYPOGLYCEMIA_EVENT                    n_pos_patients= 5199  prevalence=9.109%
+[validate]   INFECTION_EVENT                       n_pos_patients=    0  prevalence=0.000%
+[validate]   KETOACIDOSIS_EVENT                    n_pos_patients=  323  prevalence=0.566%
+[validate]   KIDNEY_COMPLICATION_EVENT             n_pos_patients= 6038  prevalence=10.579%
+[validate]   OTHER_COMPLICATION_EVENT              n_pos_patients=    0  prevalence=0.000%
+[validate]   RELEASE_EVENT                         n_pos_patients=49831  prevalence=87.303%
+[validate]   SEVERE_HYPERGLYCEMIA_EVENT            n_pos_patients=12420  prevalence=21.760%
+[validate]   SEVERE_HYPOGLYCEMIA_EVENT             n_pos_patients= 2804  prevalence=4.913%
+
+[validate] per-concept bin distribution (post-binning; expected under N(0,1) -- NORMAL ~= 38 %, +-0.5sigma to +-1sigma tails ~= 15 % each, +-1sigma to +-2sigma tails ~= 14 % each, +-2sigma outliers ~= 2.3 % each):
+[validate]   POTASSIUM_MEASURE                 VERY_=0.8%  LOW=13.8%  SLIGH=21.4%  NORMA=36.8%  SLIGH=14.0%  HIGH=10.0%  VERY_=3.2%
+[validate]   GLUCOSE_MEASURE                   VERY_=0.0%  LOW=8.9%  SLIGH=35.2%  NORMA=30.7%  SLIGH=12.1%  HIGH=8.7%  VERY_=4.4%
+[validate]   BLOOD_PRESSURE_DIASTOLIC_MEASURE  VERY_=2.7%  LOW=14.0%  SLIGH=16.9%  NORMA=18.8%  SLIGH=18.8%  HIGH=17.5%  VERY_=11.3%
+[validate]   BLOOD_PRESSURE_SYSTOLIC_MEASURE   VERY_=3.8%  LOW=16.3%  SLIGH=18.8%  NORMA=19.7%  SLIGH=18.7%  HIGH=15.4%  VERY_=7.3%
+[validate]   SODIUM_MEASURE                    VERY_=1.2%  LOW=7.9%  SLIGH=17.4%  NORMA=41.7%  SLIGH=21.7%  HIGH=9.1%  VERY_=1.1%
+[validate]   HEMATOCRIT_MEASURE                VERY_=0.8%  LOW=11.3%  SLIGH=19.0%  NORMA=33.0%  SLIGH=16.2%  HIGH=15.3%  VERY_=4.4%
+[validate]   HEMOGLOBIN_MEASURE                VERY_=0.7%  LOW=12.2%  SLIGH=19.1%  NORMA=34.0%  SLIGH=15.2%  HIGH=14.6%  VERY_=4.2%
+[validate]   BICARBONATE_MEASURE               VERY_=1.6%  LOW=8.2%  SLIGH=19.2%  NORMA=42.3%  SLIGH=15.0%  HIGH=11.4%  VERY_=2.5%
+[validate]   HEART_RATE_MEASURE                VERY_=1.9%  LOW=14.0%  SLIGH=19.9%  NORMA=23.6%  SLIGH=19.0%  HIGH=14.7%  VERY_=6.9%
+[validate]   INFECTION_WBC_MEASURE             VERY_=0.0%  LOW=1.2%  SLIGH=22.3%  NORMA=58.3%  SLIGH=11.2%  HIGH=5.5%  VERY_=1.6%
+[validate]   PLT_MEASURE                       VERY_=0.0%  LOW=7.2%  SLIGH=19.9%  NORMA=43.6%  SLIGH=14.2%  HIGH=10.6%  VERY_=4.5%
+[validate]   E-GFR_MEASURE                     VERY_=0.1%  LOW=13.1%  SLIGH=13.0%  NORMA=30.3%  SLIGH=26.6%  HIGH=16.2%  VERY_=0.7%
+[validate]   BODY_TEMPERATURE                  VERY_=4.2%  LOW=11.5%  SLIGH=24.6%  NORMA=28.0%  SLIGH=16.7%  HIGH=10.5%  VERY_=4.4%
+[validate]   UREA_MEASURE                      VERY_=0.0%  LOW=1.7%  SLIGH=36.3%  NORMA=43.4%  SLIGH=8.5%  HIGH=6.7%  VERY_=3.4%
+[validate]   CREATININE_SERUM_MEASURE          VERY_=0.0%  LOW=0.0%  SLIGH=21.8%  NORMA=64.7%  SLIGH=4.6%  HIGH=4.6%  VERY_=4.3%
+
+[validate] 29 concepts bucketed; 204 unique ConceptName tokens in output.
+
+[write] C:\Users\shaha\Work\Personal\autoresearch\autoresearch-encoder\ablation\data\source_std_bins\temporal_data.csv  (5,272,825 rows)
+[write] C:\Users\shaha\Work\Personal\autoresearch\autoresearch-encoder\ablation\data\source_std_bins\context_data.csv  (copied verbatim)
+[done]
