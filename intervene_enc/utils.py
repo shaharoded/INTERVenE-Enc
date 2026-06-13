@@ -1563,57 +1563,51 @@ def get_temporal_multi_hot_targets(
 # Tensor helpers shared by the Phase-2 / Phase-3 training loops + diagnose
 # ---------------------------------------------------------------------------
 
-def time_to_neighbour_targets(abs_ts, pad_mask, mlm_mask, max_hours=24.0):
+def time_to_neighbour_targets(abs_ts, pad_mask, mlm_mask, max_hours=24.0,
+                              min_gap_hours=0.5):
     """
     Purpose: Build per-position local-gap targets for the time_to_neighbour aux.
-    Method:  For each masked position, gap = min(t − t_prev_unmasked,
-             t_next_unmasked − t). Distances computed over normalised abs_ts
-             (hours / 336) and rescaled to hours / max_hours so the regression
-             target sits roughly in [0, 1].
+    Method:  For each masked position, target = time gap (hours) to the nearest
+             UNMASKED *non-adjacent* event, i.e. the nearest unmasked event whose
+             absolute time differs by more than ``min_gap_hours`` (default 30
+             min). Rescaled to hours / ``max_hours``.
 
-             Fully vectorised: ``cummax`` of (t · unmasked) gives the most
-             recent unmasked time to the left of every position; reversed
-             ``cummin`` gives the nearest unmasked time to the right.
+             Rationale: the previous definition used the immediately-adjacent
+             unmasked event (min of prev/next gap). EMR events cluster at near-
+             identical timestamps, so that target was near-degenerate (std≈0.02)
+             — a constant predictor solved it and the aux carried no signal.
+             Excluding sub-30-min neighbours restores a non-trivial target
+             (std≈0.1–0.2), giving the backbone real local-temporal structure to
+             learn. (MSE form and /max_hours rescale unchanged.)
+
+             Implementation: vectorised O(T²) masked-min over pairwise |Δt|.
+             T is bounded and this is the same order as attention, computed once
+             per batch.
 
     Args:
-        abs_ts    (FloatTensor): [B, T] normalised abs timestamps (t / 336 h).
-        pad_mask  (BoolTensor):  [B, T] True at non-PAD positions.
-        mlm_mask  (BoolTensor):  [B, T] True at MLM-masked positions.
-        max_hours (float):       rescale denominator.
+        abs_ts        (FloatTensor): [B, T] normalised abs timestamps (t / 336 h).
+        pad_mask      (BoolTensor):  [B, T] True at non-PAD positions.
+        mlm_mask      (BoolTensor):  [B, T] True at MLM-masked positions.
+        max_hours     (float):       rescale denominator.
+        min_gap_hours (float):       exclude unmasked neighbours closer than this
+                                     (the "non-adjacent" cutoff).
 
     Returns:
-        target  (FloatTensor): [B, T] local gap normalised to [0, ~1].
-        valid   (BoolTensor):  [B, T] positions that contribute to the loss
-                              (masked, non-PAD, with at least one unmasked
-                              neighbour in the sequence).
+        target  (FloatTensor): [B, T] local gap normalised to [0, ~5].
+        valid   (BoolTensor):  [B, T] masked, non-PAD positions that have at
+                              least one unmasked neighbour > min_gap_hours away.
     """
-    unmasked = pad_mask & (~mlm_mask)
-    inf = abs_ts.new_full(abs_ts.shape, float("inf"))
+    unmasked = pad_mask & (~mlm_mask)                                  # [B, T]
+    # Pairwise absolute time gaps in hours.
+    dt_hours = (abs_ts.unsqueeze(2) - abs_ts.unsqueeze(1)).abs() * 336.0   # [B, T, T]
+    # Candidate neighbours j: unmasked and strictly more than min_gap_hours away.
+    cand = unmasked.unsqueeze(1) & (dt_hours > min_gap_hours)          # [B, T, T]
+    masked_dt = torch.where(cand, dt_hours, dt_hours.new_full((), float("inf")))
+    gap_hours, _ = masked_dt.min(dim=2)                               # [B, T]
 
-    # left-most reachable t (most recent unmasked time ≤ i) via cummax
-    t_left = torch.where(unmasked, abs_ts, -inf)
-    t_left = torch.cummax(t_left, dim=1).values
-
-    # right-most reachable t (nearest unmasked time ≥ i) via reversed cummin
-    t_right_full = torch.where(unmasked, abs_ts, inf)
-    t_right = torch.cummin(t_right_full.flip(1), dim=1).values.flip(1)
-
-    # normalised-time gaps → hours → fraction of `max_hours`
-    left_gap_hours  = (abs_ts - t_left) * 336.0
-    right_gap_hours = (t_right - abs_ts) * 336.0
-
-    has_left  = (t_left  > -float("inf"))
-    has_right = (t_right <  float("inf"))
-
-    only_left  = has_left & (~has_right)
-    only_right = has_right & (~has_left)
-
-    gap_hours = torch.where(only_left,  left_gap_hours,
-                  torch.where(only_right, right_gap_hours,
-                  torch.minimum(left_gap_hours, right_gap_hours)))
-    gap_hours = gap_hours.clamp_min(0.0)
-
-    valid  = pad_mask & mlm_mask & (has_left | has_right)
+    has_nb = torch.isfinite(gap_hours)
+    valid = pad_mask & mlm_mask & has_nb
+    gap_hours = torch.where(has_nb, gap_hours, torch.zeros_like(gap_hours))
     target = (gap_hours / max_hours).clamp(0.0, 5.0)
     return target, valid
 
