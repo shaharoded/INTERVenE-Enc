@@ -26,7 +26,7 @@ TRAINING_SETTINGS = {
     "phase1_n_epochs": 100,
     "phase2_n_epochs": 100,
     "phase3_n_epochs": 100,
-    "sample": None,  # For smoke tests.
+    "sample": 10000,  # Stage A/B/C decision sweep convention (Phase 1/2/3). D/E use None.
 
     # Phase-2 optimizer LR warmup (OneCycleLR pct_start).
     # This controls optimizer step size ramp-up, not auxiliary-loss lambda warmup.
