@@ -105,6 +105,11 @@ if __name__ == "__main__":
                     help="skip training; B patient-resample bootstrap CIs on the cached checkpoint (default 2000)")
     _p.add_argument("--sample", type=int, default=None,
                     help="override TRAINING_SETTINGS['sample'] (for --diagnose / --bootstrap on sampled splits)")
+    _p.add_argument("--phase3-only", dest="phase3_only", action="store_true",
+                    help="skip Phase-1 and Phase-2 training; require their cached checkpoints "
+                         "to exist and reuse them; train Phase-3 only. Used for fast Phase-3 "
+                         "sweeps (e.g., Exp-A loss/regulariser bundle) that don't change the "
+                         "backbone or embedder.")
     _CLI = _p.parse_args()
     if _CLI.smoke:
         TRAINING_SETTINGS.update({
@@ -135,6 +140,13 @@ TEST_SPLIT  = 0.15  # held-out, never seen until final evaluation
 VAL_SPLIT   = 0.15  # used for early-stop monitoring during P2/P3
 RANDOM_SEED = 42
 
+# Phase-3 supervised input window. Must match `evaluation.py::EVAL_INPUT_DAYS`
+# so the train and eval tasks are identical (no label-leakage from
+# late-trajectory outcome tokens being visible during training). Phase 1 / 2
+# still see the full 0–336 h trajectory — pretraining benefits from the
+# wider context.
+PHASE3_INPUT_DAYS = 2
+
 # ===========================================================================
 # Fixed API: data loading — do not modify
 # ===========================================================================
@@ -160,24 +172,33 @@ def load_data(sample=None, batch_size=64):
     """
     # ── Fast path: reload the cached processed datasets if present ──────────
     cache_path = Path(PROCESSED_CACHE)
-    cache_key  = (sample, RANDOM_SEED, TEST_SPLIT, VAL_SPLIT, USE_QA_DATA)
+    # Cache key now includes PHASE3_INPUT_DAYS so a change to the Phase-3
+    # window invalidates the cache and forces a rebuild.
+    cache_key  = (sample, RANDOM_SEED, TEST_SPLIT, VAL_SPLIT, USE_QA_DATA, PHASE3_INPUT_DAYS)
     if sample is None and cache_path.exists():
         try:
             cached = torch.load(str(cache_path), map_location="cpu", weights_only=False)
-            if cached.get("key") == cache_key:
+            if cached.get("key") == cache_key and "train_ds_p3" in cached:
                 print(f"[Data]: Loading cached processed datasets from {cache_path.name}...")
-                train_ds   = cached["train_ds"]
-                val_ds     = cached["val_ds"]
-                tokenizer  = cached["tokenizer"]
-                test_raw   = cached["test_raw"]
+                train_ds    = cached["train_ds"]
+                val_ds      = cached["val_ds"]
+                train_ds_p3 = cached["train_ds_p3"]
+                val_ds_p3   = cached["val_ds_p3"]
+                tokenizer   = cached["tokenizer"]
+                test_raw    = cached["test_raw"]
                 n_train, n_val, n_test = cached["sizes"]
-                print(f"[Data]: cached — {n_train} train / {n_val} val / {n_test} test patients")
+                print(f"[Data]: cached — {n_train} train / {n_val} val / {n_test} test patients "
+                      f"(full + {PHASE3_INPUT_DAYS}-day-truncated Phase-3 datasets present)")
 
-                train_dl = get_dataloader(train_ds, batch_size=batch_size,
-                                          collate_fn=collate_emr, oversample=False, bucket_batching=True)
-                val_dl   = get_dataloader(val_ds, batch_size=batch_size,
-                                          collate_fn=collate_emr, oversample=False, bucket_batching=True)
-                return train_dl, val_dl, tokenizer, test_raw
+                train_dl    = get_dataloader(train_ds, batch_size=batch_size,
+                                             collate_fn=collate_emr, oversample=False, bucket_batching=True)
+                val_dl      = get_dataloader(val_ds, batch_size=batch_size,
+                                             collate_fn=collate_emr, oversample=False, bucket_batching=True)
+                train_dl_p3 = get_dataloader(train_ds_p3, batch_size=batch_size,
+                                             collate_fn=collate_emr, oversample=False, bucket_batching=True)
+                val_dl_p3   = get_dataloader(val_ds_p3, batch_size=batch_size,
+                                             collate_fn=collate_emr, oversample=False, bucket_batching=True)
+                return train_dl, val_dl, train_dl_p3, val_dl_p3, tokenizer, test_raw
         except Exception as e:
             print(f"[Data]: cache load failed ({e}); rebuilding from source CSVs.")
 
@@ -237,8 +258,38 @@ def load_data(sample=None, batch_size=64):
     train_ds = EMRDataset(train_temporal_df, train_ctx_df, tokenizer=tokenizer)
     val_ds   = EMRDataset(val_temporal_df,   val_ctx_df,   tokenizer=tokenizer)
 
+    # ── Phase-3 truncated pass ──────────────────────────────────────────────
+    # The Phase-3 supervised head trains on the same input window the eval
+    # uses (first PHASE3_INPUT_DAYS = 2 days). Without this, the model sees
+    # the RELEASE / DEATH tokens at hour ~159 in the input and trivially
+    # locates them — no gradient pressure to actually forecast. Phase 1 / 2
+    # stay on the full 0–336 h trajectory.
+    print(f"[Data]: Processing train split for Phase-3 "
+          f"(max_input_days={PHASE3_INPUT_DAYS})...")
+    train_processor_p3 = DataProcessor(
+        train_temporal_raw.copy(), train_ctx_raw.copy(),
+        scaler=scaler, tak_repo_path=TAK_REPO_PATH,
+        checkpoint_path=CHECKPOINT_DIR,
+        max_input_days=PHASE3_INPUT_DAYS,
+    )
+    train_temporal_df_p3, train_ctx_df_p3 = train_processor_p3.run()
+    print(f"[Data]: Processing val split for Phase-3 "
+          f"(max_input_days={PHASE3_INPUT_DAYS})...")
+    val_processor_p3 = DataProcessor(
+        val_temporal_raw.copy(), val_ctx_raw.copy(),
+        scaler=scaler, tak_repo_path=TAK_REPO_PATH,
+        checkpoint_path=CHECKPOINT_DIR,
+        max_input_days=PHASE3_INPUT_DAYS,
+    )
+    val_temporal_df_p3, val_ctx_df_p3 = val_processor_p3.run()
+
+    train_ds_p3 = EMRDataset(train_temporal_df_p3, train_ctx_df_p3, tokenizer=tokenizer)
+    val_ds_p3   = EMRDataset(val_temporal_df_p3,   val_ctx_df_p3,   tokenizer=tokenizer)
+
     print(f"[Data]: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test patients  "
-          f"({len(train_ds.tokens_df):,} train records, {len(val_ds.tokens_df):,} val records; "
+          f"(full: {len(train_ds.tokens_df):,} train / {len(val_ds.tokens_df):,} val records; "
+          f"Phase-3 {PHASE3_INPUT_DAYS}-day: "
+          f"{len(train_ds_p3.tokens_df):,} train / {len(val_ds_p3.tokens_df):,} val records; "
           f"test held out, processed at eval time)")
 
     # Persist processed datasets so the next architecture experiment skips the
@@ -249,6 +300,8 @@ def load_data(sample=None, batch_size=64):
                 "key": cache_key,
                 "train_ds": train_ds,
                 "val_ds": val_ds,
+                "train_ds_p3": train_ds_p3,
+                "val_ds_p3":   val_ds_p3,
                 "tokenizer": tokenizer,
                 "test_raw": (test_temporal_raw, test_ctx_raw),
                 "sizes": (len(train_ids), len(val_ids), len(test_ids)),
@@ -257,11 +310,15 @@ def load_data(sample=None, batch_size=64):
         except Exception as e:
             print(f"[Data]: cache save failed ({e}); continuing without cache.")
 
-    train_dl = get_dataloader(train_ds, batch_size=batch_size,
-                              collate_fn=collate_emr, oversample=False, bucket_batching=True)
-    val_dl   = get_dataloader(val_ds, batch_size=batch_size,
-                              collate_fn=collate_emr, oversample=False, bucket_batching=True)
-    return train_dl, val_dl, tokenizer, (test_temporal_raw, test_ctx_raw)
+    train_dl    = get_dataloader(train_ds, batch_size=batch_size,
+                                 collate_fn=collate_emr, oversample=False, bucket_batching=True)
+    val_dl      = get_dataloader(val_ds, batch_size=batch_size,
+                                 collate_fn=collate_emr, oversample=False, bucket_batching=True)
+    train_dl_p3 = get_dataloader(train_ds_p3, batch_size=batch_size,
+                                 collate_fn=collate_emr, oversample=False, bucket_batching=True)
+    val_dl_p3   = get_dataloader(val_ds_p3, batch_size=batch_size,
+                                 collate_fn=collate_emr, oversample=False, bucket_batching=True)
+    return train_dl, val_dl, train_dl_p3, val_dl_p3, tokenizer, (test_temporal_raw, test_ctx_raw)
 
 
 TRAIN_SUMMARY_PATH = os.path.join(CHECKPOINT_DIR, "train_summary.json")
@@ -274,7 +331,7 @@ if _CLI is not None and _CLI.build_cache:
     _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _sample = _CLI.sample if _CLI.sample is not None else TRAINING_SETTINGS.get("sample")
     print(f"[build-cache] sample={_sample}")
-    _train_dl, _val_dl, _tokenizer, _test_raw = load_data(
+    _train_dl, _val_dl, _train_dl_p3, _val_dl_p3, _tokenizer, _test_raw = load_data(
         sample=_sample, batch_size=TRAINING_SETTINGS["batch_size"],
     )
     _ntrain = len(_train_dl.dataset) if hasattr(_train_dl, "dataset") else "?"
@@ -293,7 +350,7 @@ if _CLI is not None and (_CLI.diagnose or _CLI.bootstrap):
     print(f"[cli] mode={'diagnose' if _CLI.diagnose else 'bootstrap'} "
           f"sample={_sample} device={_device}")
 
-    _train_dl, _val_dl, _tokenizer, _test_raw = load_data(
+    _train_dl, _val_dl, _train_dl_p3, _val_dl_p3, _tokenizer, _test_raw = load_data(
         sample=_sample, batch_size=TRAINING_SETTINGS["batch_size"],
     )
     for _batch in _val_dl:
@@ -349,7 +406,7 @@ for _phase in ["phase2", "phase3"]:
     _phase_path.mkdir(parents=True, exist_ok=True)
 (Path(CHECKPOINT_DIR) / "phase1").mkdir(parents=True, exist_ok=True)
 
-train_dl, val_dl, tokenizer, test_raw = load_data(
+train_dl, val_dl, train_dl_p3, val_dl_p3, tokenizer, test_raw = load_data(
     sample=TRAINING_SETTINGS.get("sample"),
     batch_size=TRAINING_SETTINGS["batch_size"],
 )
@@ -373,8 +430,17 @@ _embedder_key = (
 
 _cached_ckpt     = Path(EMBEDDER_CHECKPOINT)
 _embedder_reused = False
+_phase3_only     = bool(_CLI is not None and _CLI.phase3_only)
 
-if _cached_ckpt.exists():
+if _phase3_only:
+    if not _cached_ckpt.exists():
+        print(f"[Phase 1][error] --phase3-only requires a Phase-1 checkpoint at "
+              f"{EMBEDDER_CHECKPOINT}. Train Phase 1 first, then re-run.")
+        sys.exit(1)
+    print("[Phase 1]: --phase3-only — loading cached embedder, skipping training.")
+    embedder, *_ = EMREmbedding.load(str(_cached_ckpt), tokenizer=tokenizer)
+    _embedder_reused = True
+elif _cached_ckpt.exists():
     try:
         _ckpt_cfg   = torch.load(str(_cached_ckpt), map_location="cpu", weights_only=True)["config"]
         _cached_key = (
@@ -417,15 +483,27 @@ if not _embedder_reused:
 # ---------------------------------------------------------------------------
 # Phase 2 — Bidirectional MLM pre-training over the learned embeddings
 # ---------------------------------------------------------------------------
-encoder = InterveneEncoder(cfg=MODEL_CONFIG, embedder=embedder)
-encoder, _, val_losses = pretrain_transformer(
-    model             = encoder,
-    train_dl          = train_dl,
-    val_dl            = val_dl,
-    resume            = False,
-    checkpoint_path   = TRANSFORMER_CHECKPOINT,
-    training_settings = TRAINING_SETTINGS,
-)
+if _phase3_only:
+    _p2_ckpt = Path(TRANSFORMER_CHECKPOINT)
+    if not _p2_ckpt.exists():
+        print(f"[Phase 2][error] --phase3-only requires a Phase-2 checkpoint at "
+              f"{TRANSFORMER_CHECKPOINT}. Train Phase 2 first, then re-run.")
+        sys.exit(1)
+    print("[Phase 2]: --phase3-only — loading cached encoder, skipping training.")
+    encoder, *_ = InterveneEncoder.load(
+        str(_p2_ckpt), embedder=embedder, attach_task_heads=False,
+    )
+    val_losses = []
+else:
+    encoder = InterveneEncoder(cfg=MODEL_CONFIG, embedder=embedder)
+    encoder, _, val_losses = pretrain_transformer(
+        model             = encoder,
+        train_dl          = train_dl,
+        val_dl            = val_dl,
+        resume            = False,
+        checkpoint_path   = TRANSFORMER_CHECKPOINT,
+        training_settings = TRAINING_SETTINGS,
+    )
 
 # ---------------------------------------------------------------------------
 # Phase 3 — Outcome + time fine-tune (task heads attached on top of P2 best)
@@ -447,8 +525,8 @@ else:
 
 model_p3, _, p3_val_losses = finetune_transformer(
     model             = model_p3,
-    train_dl          = train_dl,
-    val_dl            = val_dl,
+    train_dl          = train_dl_p3,
+    val_dl            = val_dl_p3,
     resume            = False,
     checkpoint_path   = PHASE3_CHECKPOINT,
     training_settings = TRAINING_SETTINGS,
