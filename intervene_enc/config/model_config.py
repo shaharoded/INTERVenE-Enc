@@ -139,4 +139,10 @@ TRAINING_SETTINGS = {
     # shared MLP. ``None`` inherits the backbone's MODEL_CONFIG["dropout"].
     # 0.20 matches STraTS's attention_dropout.
     "phase3_pool_dropout": 0.20,
+    # phase3_pos_weight_mode — outcome weighting on the risk (focal-)BCE
+    # loss. "inv_prev" (default): per-outcome pos_weight = n_neg / n_pos
+    # from the tokenizer. "uniform": pos_weight = 1 for every outcome.
+    # The Exp-A ablation flips this to verify class-imbalance weighting
+    # is still load-bearing once focal-BCE is layered on top.
+    "phase3_pos_weight_mode": "inv_prev",
 }

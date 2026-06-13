@@ -57,17 +57,250 @@ contract is what makes ledger rows comparable across iterations. Edits live in
 
 ## Research directions / experiments
 
-<!-- INSERT RESEARCH DIRECTIONS / EXPERIMENTS HERE -->
+### Stage A / B / C / D / E — closing the STraTS gap, then sizing and abstraction
 
-When kicking off a new sweep, append a section below with:
+**Goal.** Beat STraTS on every headline metric on the `user_mimic_iv` cohort.
+The encoder already wins on weighted AUPRC (0.749 vs 0.612) but loses on
+weighted AUROC (0.845 vs 0.890), almost entirely because of two concentrated
+failure modes:
 
-- Goal (one paragraph).
-- Listed directions (numbered, one falsifiable hypothesis each).
-- Performance expectations + the literature baseline you want to beat.
-- Exit condition (when does this sweep terminate?).
+1. **RELEASE length-of-stay MAE** at 112 h (STraTS 48 h) — caused by a
+   smooth-L1 time-head loss that's L1 in practice, exerts no gradient pressure
+   to predict per-patient variance, and collapses to the conditional median.
+2. **DEATH AUPRC / AUROC** (0.234 / 0.638 vs STraTS 0.518 / 0.893) —
+   rare-positive underdiscrimination on the risk side.
 
-Past sweeps and their verdicts live in `results/status.md`; the headline
-ledger is `results/results.tsv`.
+**Headline metric for all decisions in this sweep is weighted AUPRC**
+(`patient_auprc_weighted`). AUROC is tracked but used only as a sanity check.
+Per-outcome AUPRC on **DEATH** and **SEVERE_HYPOGLYCEMIA** is the second
+decision metric — we want to see improvement there, so any regression from the current result needs to be inspected.
+
+The sweep is five experiment directions. A, B run unconditionally. C is **optional**.
+D and E run after the architecture + recipe are chosen.
+
+**Sample size convention.** Exp A, B, C run at `sample=10000` (Phase 1/2/3)
+— they are decision sweeps, not deliverables, and the 10 k subset is enough
+for a clear ranking under the loop's KEEP rule. Exp D (size) and Exp E
+(abstraction) **must run on the full dataset** (`sample=None` for Phase
+2/3, `sample=10000` for Phase 1 per program convention) because their
+outputs are headline deliverables — sizes and the abstraction
+transferability finding both go into the paper. **Parameter counts must be
+reported for every D and E variant** (one row per `M-<embed_dim>` arm in
+the size sweep, one row per Exp-E arm) alongside the metric table.
+
+#### Stop-at-B gate (skip Exp C)
+
+Skip Exp C if the Exp-B winner clears both targets on the sample=10000 eval:
+
+- RELEASE LoS MAE ≤ 70 h, **AND**
+- DEATH AUPRC ≥ 0.40 (almost double the locked 0.234 - within the same areas as the SS-STraTS DEATH. 
+We don't need to win STraTS on every outcome, but I want to close this gap).
+
+If both targets hold, the Exp-B winner is the chosen recipe — run Exp D and
+Exp E on it. If either misses, run Exp C and re-test the same targets on
+the Exp-C winner.
+
+#### Exp A — Phase-3 loss + regulariser bundle (Phase-3-only re-finetune)
+
+Resume from the existing full-data Phase-1 and Phase-2 checkpoints; only
+Phase-3 retrains. Each variant lands in its own
+`checkpoints.bak_keep_<tag>/` dir.
+
+Config knobs added in commit `8954e9e`:
+- `phase3_time_lambda` (per-outcome z-MSE time loss weight). Default 0.5.
+- `phase3_focal_gamma` (focal-BCE γ on the risk head). Default 2.0.
+- `phase3_cbm_p` (CBM input-token replacement during Phase-3 only). Default 0.25.
+- `phase3_pool_dropout` (independent of backbone dropout). Default 0.20.
+- `phase3_pos_weight_mode` ∈ {`"inv_prev"`, `"uniform"`}. Default `"inv_prev"`.
+
+**Exp A is a knock-out sweep that must explicitly pick a winner per knob.**
+The agent runs the four variants below, then journals one chosen Phase-3
+recipe whose every knob has been individually justified by the data.
+
+| Tag | Config delta vs `A0` | What it decides |
+|---|---|---|
+| `A0` (baseline bundle) | (all defaults above) | Anchor for the three knock-outs. |
+| `A_no_focal` | `phase3_focal_gamma = 0.0` | Keep focal-BCE iff `A0` > `A_no_focal` on weighted AUPRC (margin ≥ 0.005) **or** on DEATH AUPRC (margin ≥ 0.01). Otherwise strip and fall back to γ=0. |
+| `A_no_cbm` | `phase3_cbm_p = 0.0` | Same rule, CBM dropout vs none. |
+| `A_posweight_uniform` | `phase3_pos_weight_mode = "uniform"` | Same rule, inverse-prevalence vs uniform. The agent reports both arms and **picks the one with higher weighted AUPRC, tie-broken by DEATH AUPRC**, then journals which mode was chosen. |
+
+Only do the γ ∈ {1, 3} sweep if `A0` beats `A_no_focal` cleanly (so we know γ
+is doing something real) — otherwise it's tuning on noise.
+
+The output of Exp A is a single "Phase-3 recipe" config dict, journalled
+verbatim into `results/status.md`. Exp B uses it as a frozen starting
+point.
+
+#### Exp B — Attention-head budget (Phase-1/2/3 retrain)
+
+Start from the Exp-A winner's Phase-3 recipe. Vary attention heads while
+keeping `embed_dim = 128` constant — total parameter count moves only via
+head allocation, so the comparison isolates "more attention pathways at
+smaller per-head dim" (the STraTS inductive bias).
+
+| Tag | `n_head` | `head_dim` | Note |
+|---|---:|---:|---|
+| `B_4heads`  | 4  | 32 | Moderate step toward STraTS |
+| `B_8heads`  | 8  | 16 | Aggressive |
+| `B_16heads` | 16 | 8  | STraTS-match (their MIMIC-III config) |
+
+**Early-stop the sweep** if `B_8heads` is within 0.005 weighted AUPRC of
+`B_16heads` and DEATH AUPRC is within 0.01 — the smaller variant is
+preferred per program convention.
+
+#### Exp C — Pretraining objective (optional; Phase-1/2/3 retrain)
+
+**Only runs if the Exp-B winner misses the stop-at-B gate above.** Start from
+the Exp-B winner. Add a forecasting auxiliary to Phase 2: predict the next
+position's `(concept_id, value_id)` at a 2 h horizon alongside MLM,
+scheduled by `LambdaScheduleController` with its own `aux_fraction_cap`.
+
+| Tag | Config delta |
+|---|---|
+| `C_forecast_aux` | `forecast_next` aux added to `phase2_scheduler.aux_fraction_caps`, cap = 0.2 |
+| `C_forecast_aux_strong` | (only if `C_forecast_aux` moves the needle but undershoots) cap = 0.4 |
+
+#### Exp D — Total-size ablation (after A+B+C land)
+
+Once the Phase-3 recipe (Exp A) and head ratio (Exp B, optionally C) are
+fixed, sweep total model capacity by scaling `embed_dim` and `n_head`
+**proportionally** so the per-head dim stays at the Exp-B winner's value.
+`n_layer` stays at 4 (program-wide convention) unless an arm explicitly
+varies it.
+
+Notation: `M-<embed_dim>` (same as the AR P6 sweep).
+
+| Tag | `embed_dim` | `n_head` | Approx params |
+|---|---:|---:|---:|
+| `D_M128` | 128 | (Exp-B winner) | ≈ 1.85 M (current size) |
+| `D_M192` | 192 | embed_dim / head_dim | ≈ 4 M |
+| `D_M256` | 256 | embed_dim / head_dim | ≈ 7 M |
+| `D_M384` | 384 | embed_dim / head_dim | ≈ 16 M |
+| `D_M512` | 512 | embed_dim / head_dim | (only if D_M384 wins by ≥ CI margin) |
+
+Each row's journal block **must report the exact param count**
+(`count_parameters`) alongside its headline metrics.
+
+**Stop rule.** As soon as a step improves weighted AUPRC by **less than the
+bootstrap 95 % CI half-width of the previous size's eval** (≈ 0.005 typical),
+the previous size is the chosen total capacity. The program prefers smaller
+under tie. If `D_M256` already saturates (within CI of `D_M192`), `D_M192`
+wins and we don't run `D_M384`+.
+
+OOM handling: Size is the ceiling. No need to start fighting it with batching sizes and grad accumulations, unless it happened before M384.
+
+#### Exp E — Temporal-abstraction ablation (transferability check; single retrain)
+
+Tests whether the encoder's gains depend on the TAK-abstracted
+`temporal_data.csv` upstream or generalise to a simpler discretisation
+scheme. The Exp-D winner is already the full-data headline run on the
+original TAK input, so Exp E is a **single retrain** of the same
+architecture + recipe on the std-binned input and a direct comparison
+against the Exp-D winner — no separate baseline arm needed.
+
+**Local preprocessing script** — will be created at
+`ablation/preprocess_std_bins.py` **before Exp E runs** (the human will hand
+off the script and the resulting `temporal_data.csv` together). The script
+runs on the developer's local machine and the std-binned CSV is scp'd to
+the pod. Until then, the agent should treat Exp E as a parked deliverable
+and not attempt to write the script or run the ablation. Specification (for
+record-keeping; the script will conform):
+
+1. **Inputs**: `data/source/mimic-iv-input-data.csv` (raw measurements,
+   STraTS-style; this file lives **only locally** — it is not part of the
+   GPU pod's setup — so the script runs on the developer's machine and the
+   resulting `temporal_data.csv` is shipped to the pod via scp), and
+   `data/source/context_data.csv` (unchanged).
+2. **Numeric measurement bucketing**:
+   - For each `ConceptName` whose `Value` parses to a numeric (measurement
+     concepts only), compute the **train-split** mean μ and std σ.
+   - Bin every observation into one of 5 categories:
+     - `VERY_LOW`  if `v < μ − 2σ`
+     - `LOW`       if `μ − 2σ ≤ v < μ − 1σ`
+     - `NORMAL`    if `μ − 1σ ≤ v ≤ μ + 1σ`
+     - `HIGH`      if `μ + 1σ < v ≤ μ + 2σ`
+     - `VERY_HIGH` if `v > μ + 2σ`
+   - The output row's `ConceptName` becomes `<orig_concept>_STD_<bin>` and
+     its `Value` becomes the bin string. Numeric value is dropped; the
+     encoder will indicator-encode it on input (value = 1.0).
+3. **Interval collapsing** (the "concat consecutive same bin within 24 h"
+   rule): per patient, sort observations by `StartDateTime`. For each
+   measurement concept, walk consecutive observations; if two adjacent
+   observations of the same concept share the same bin **and** their
+   `StartDateTime` are within 24 h, collapse them into one event with
+   `StartDateTime` = first observation's time and `EndDateTime` =
+   last observation's time. This gives an interval representation.
+4. **Outcomes pass through unchanged**: rows whose `ConceptName` matches any
+   outcome regex in `EVENT_OUTCOME_REGEX` are copied verbatim — no binning,
+   no collapse. Same for the terminal tokens (`DEATH`, `RELEASE`) and the
+   `ADMISSION` event.
+5. **Categorical / boolean measurements** (Value not numeric): pass through
+   unchanged.
+6. **Validation block** (script must print before exiting):
+   - Total row count before / after collapse.
+   - Per-outcome support (n_pos / n_total) on the train split — must match
+     the support extracted by the existing autoresearch preprocess to within
+     ±0.5 % per outcome.
+   - Per-concept bin distribution (sanity: NORMAL ≈ 68 %, ±2σ outliers ≈ 2.3 %
+     each side).
+7. **Output**: write `ablation/data/source_std_bins/temporal_data.csv` and
+   copy `context_data.csv`. The autoresearch loader is unchanged; only the
+   `TEMPORAL_DATA_FILE` / `CONTEXT_DATA_FILE` constants point at the new
+   directory for this experiment.
+
+**Single arm**:
+
+| Tag | Config |
+|---|---|
+| `E_std_bins` | Exp-D winner architecture + Exp-A recipe, retrained Phase-1/2/3 on the std-binned `temporal_data.csv`. |
+
+Report parameter count alongside the headline metrics — the std-bins vocab
+will differ from TAK's after the `<concept>_STD_<bin>` expansion, so the
+total param count will differ too and should be documented.
+
+**What it answers.** If `E_std_bins` lands within 0.010 weighted AUPRC of
+the Exp-D winner and DEATH AUPRC isn't worse by > 0.01, the encoder's gains
+are **architecture-driven, not TAK-abstraction-driven** — that's the
+transferability finding. If it loses materially, TAK abstraction is part of
+the recipe and the paper has to say so.
+
+#### Additional gates for this sweep (overlay on Loop discipline)
+
+The standard smoke gates A–D, post-train T1–T3, and KEEP rule in the Loop
+discipline section apply unchanged. The checks below are extra requirements
+that apply to every variant of every experiment in this sweep:
+
+- **Per-loss magnitude monitor.** Risk loss, time loss, MLM CE, dt aux,
+  t_pos, t_local, and (when present) forecast — emit raw and weighted
+  values each epoch. Flag any term that drops below `1e-4 × main` for ≥ 2
+  epochs as **starving**; recommend the λ bump and do not declare KEEP. In
+  Phase 3 specifically, if `lambda_time × time_loss < 1e-2 × risk_loss`
+  for an extended span, the time term is effectively absent and the LoS /
+  time-MAE numbers cannot be trusted.
+- **Focal sanity.** Once per epoch-1, print one batch's loss with γ=0
+  alongside the focal loss. If `focal_loss / bce_loss < 0.05`, γ is too
+  aggressive — journal the observation and recommend a lower γ.
+- **Per-outcome AUPRC blocker.** After Phase-3, include the per-outcome
+  AUROC / AUPRC / time-head-MAE table in the journal with explicit
+  attention to `DEATH_EVENT`, `SEVERE_HYPOGLYCEMIA_EVENT`, and LoS. A
+  regression of ≥ 0.01 absolute AUPRC (or ≥ 5 h on LoS) vs the locked
+  baseline is a blocker even if weighted averages lift.
+- **Diagnose-time probes** required in the journal block before KEEP:
+  - `probe_time_head_predictions`: every outcome must show
+    `pred_std > 0.5 × gt_std`. If an outcome is collapsed, do not KEEP —
+    investigate, try different constants, or drop the experiment.
+  - `probe_outcome_logit_distribution`: no head saturated.
+  - `probe_pool_attention`: per-outcome entropy in
+    `[0.3·log(seq_len), 0.9·log(seq_len)]`.
+
+#### Exit condition
+
+The sweep terminates when:
+- Exp A is complete and the Phase-3 recipe winner is journalled, **AND**
+- Exp B is complete (with early-stop applied), **AND**
+- Either the Exp-B winner clears the stop-at-B gate **OR** Exp C is complete, **AND**
+- Exp D terminates at the within-CI size, **AND**
+- Exp E (`E_std_bins`) is complete and compared against the Exp-D winner.
 
 ---
 
@@ -200,7 +433,7 @@ is more valuable to the next iteration than a quiet rollback.
 
 ## Reproducibility
 
-- Repo: `https://github.com/shaharoded/Transform-EMR-Encoder.git`.
+- Repo: `https://github.com/shaharoded/INTERVenE-Enc.git`.
 - Branch: `autoresearcher-updates`. No force-push, ever.
 - Ledger: `results/results.tsv`. Append one row per experiment with the
   headline keys + per-outcome breakdown reference. Never overwrite rows.

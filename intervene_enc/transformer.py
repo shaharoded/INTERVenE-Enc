@@ -991,15 +991,29 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
         if pre.get("training_settings") is not None:
             training_settings = pre["training_settings"]
 
-    # Per-outcome pos_weight from training prevalence:
-    # tokenizer.outcome_weights holds n_neg/n_pos at the token id.
+    # Per-outcome pos_weight for the risk loss. `phase3_pos_weight_mode`
+    # selects between the inverse-prevalence weighting (default; same
+    # convention STraTS uses on its multi-label BCE) and a uniform mode
+    # used for the Exp A ablation that isolates whether class-imbalance
+    # weighting still matters once focal-BCE is on top.
     tok = model.embedder.tokenizer
     risk_idx_cpu = model.task_heads.risk_idx.cpu().tolist()
     risk_outcome_names = [model.outcome_names[i] for i in risk_idx_cpu]
-    pos_weight = torch.tensor(
-        [tok.outcome_weights[tok.token2id[n]].item() for n in risk_outcome_names],
-        dtype=torch.float32, device=device,
-    )
+    pos_weight_mode = training_settings.get("phase3_pos_weight_mode", "inv_prev")
+    if pos_weight_mode == "uniform":
+        pos_weight = torch.ones(len(risk_outcome_names), dtype=torch.float32, device=device)
+    elif pos_weight_mode == "inv_prev":
+        pos_weight = torch.tensor(
+            [tok.outcome_weights[tok.token2id[n]].item() for n in risk_outcome_names],
+            dtype=torch.float32, device=device,
+        )
+    else:
+        raise ValueError(
+            f"Unknown phase3_pos_weight_mode={pos_weight_mode!r}; "
+            f"expected 'inv_prev' or 'uniform'."
+        )
+    print(f"[Phase-3] risk pos_weight mode = {pos_weight_mode}; "
+          f"weights = {pos_weight.tolist()}")
 
     # Focal-BCE: same per-outcome `pos_weight` as before, but the (1 − p_t)^γ
     # modulator downweights confident easy examples so rare-positive outcomes
