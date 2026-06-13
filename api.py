@@ -429,12 +429,18 @@ print(f"Device: {device}")
 # Phase-1 (embedder) is preserved and reused when the (embed_dim, time2vec_dim,
 # ctx_dim) tuple matches the cached checkpoint — no need to re-train the
 # embedder unless those change.
-for _phase in ["phase2", "phase3"]:
+# When --phase3-only is set the existing Phase-2 checkpoint is the whole point
+# of the run (Phase 3 finetunes on top), so only Phase 3 is cleared. Phase 1
+# is always preserved.
+_phase3_only_clear = bool(_CLI is not None and _CLI.phase3_only)
+_phases_to_clear   = ["phase3"] if _phase3_only_clear else ["phase2", "phase3"]
+for _phase in _phases_to_clear:
     _phase_path = Path(CHECKPOINT_DIR) / _phase
     if _phase_path.exists():
         shutil.rmtree(_phase_path)
     _phase_path.mkdir(parents=True, exist_ok=True)
 (Path(CHECKPOINT_DIR) / "phase1").mkdir(parents=True, exist_ok=True)
+(Path(CHECKPOINT_DIR) / "phase2").mkdir(parents=True, exist_ok=True)
 
 train_dl, val_dl, train_dl_p3, val_dl_p3, tokenizer, test_raw = load_data(
     sample=TRAINING_SETTINGS.get("sample"),
