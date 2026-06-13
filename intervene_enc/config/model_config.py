@@ -86,12 +86,13 @@ TRAINING_SETTINGS = {
             "t_pos":   0,          # no ramp; jump to λ_max at unlock
             "t_local": 0,
         },
-        # Per-aux λ_max ceiling. t_local's raw MSE is tiny (~5e-4, near-trivial
-        # target) so the fraction-cap rule wants λ≈hundreds to reach 30% of MLM;
-        # the global clamp (10) pinned it invisible (diagnosed: grad reaches the
-        # head, init MSE 4.7e-4). Uncap t_local only; t_pos stays at the default
-        # 10 (it learned fine during its unclamped early phase — leave it alone).
-        "max_lambda": {"t_local": 400.0},
+        # Per-aux λ_max ceiling (overrides the global hard clamp of 10). The
+        # global clamp is a safety against a tiny-magnitude aux getting a runaway
+        # λ from the fraction rule (λ = fraction_cap × MLM/aux). Both time auxes
+        # are now uncapped so the fraction-cap rule alone governs their weight:
+        #   t_local → λ≈61 (0.30 share);  t_pos → λ≈41 (0.40 share).
+        # (Phase-1 `dt` keeps the default-10 safety; it's tiny and never binds.)
+        "max_lambda": {"t_local": 400.0, "t_pos": 400.0},
     },
 
     # Outcome head — time-decayed soft labels.
