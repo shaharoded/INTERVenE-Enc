@@ -174,7 +174,11 @@ def load_data(sample=None, batch_size=64):
     cache_path = Path(PROCESSED_CACHE)
     # Cache key now includes PHASE3_INPUT_DAYS so a change to the Phase-3
     # window invalidates the cache and forces a rebuild.
-    cache_key  = (sample, RANDOM_SEED, TEST_SPLIT, VAL_SPLIT, USE_QA_DATA, PHASE3_INPUT_DAYS)
+    # Cache version: bumped when the dataset schema changes. v2 = adds the
+    # un-truncated label source (full_seq_by_pid) to Phase-3 EMRDatasets so
+    # build_patient_labels reads outcome-anywhere labels rather than labels
+    # truncated to the 48 h input window.
+    cache_key  = (sample, RANDOM_SEED, TEST_SPLIT, VAL_SPLIT, USE_QA_DATA, PHASE3_INPUT_DAYS, "labels_v2")
     if sample is None and cache_path.exists():
         try:
             cached = torch.load(str(cache_path), map_location="cpu", weights_only=False)
@@ -283,14 +287,40 @@ def load_data(sample=None, batch_size=64):
     )
     val_temporal_df_p3, val_ctx_df_p3 = val_processor_p3.run()
 
-    train_ds_p3 = EMRDataset(train_temporal_df_p3, train_ctx_df_p3, tokenizer=tokenizer)
-    val_ds_p3   = EMRDataset(val_temporal_df_p3,   val_ctx_df_p3,   tokenizer=tokenizer)
+    # label_source_df = un-truncated trajectory df. Phase-3 input is sliced
+    # to 48 h above; labels and time-targets must still come from the full
+    # 0–336 h trajectory (matching evaluation.py), otherwise RELEASE/DEATH
+    # tokens fall outside the input window and the model trains against
+    # near-empty positives for terminal outcomes.
+    train_ds_p3 = EMRDataset(train_temporal_df_p3, train_ctx_df_p3,
+                             tokenizer=tokenizer,
+                             label_source_df=train_temporal_df)
+    val_ds_p3   = EMRDataset(val_temporal_df_p3,   val_ctx_df_p3,
+                             tokenizer=tokenizer,
+                             label_source_df=val_temporal_df)
 
     print(f"[Data]: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test patients  "
           f"(full: {len(train_ds.tokens_df):,} train / {len(val_ds.tokens_df):,} val records; "
           f"Phase-3 {PHASE3_INPUT_DAYS}-day: "
           f"{len(train_ds_p3.tokens_df):,} train / {len(val_ds_p3.tokens_df):,} val records; "
           f"test held out, processed at eval time)")
+
+    # Sanity print: counts must match outcome-anywhere prevalences on the
+    # un-truncated trajectory. If RELEASE/DEATH show n_pos≈1 here, the
+    # label_source_df wiring is broken and Phase 3 will train on empty
+    # positives — abort the run rather than silently learn the wrong target.
+    _probe_outcomes = ["RELEASE_EVENT", "DEATH_EVENT", "HYPERGLYCEMIA_EVENT",
+                       "KIDNEY_COMPLICATION_EVENT"]
+    _probe_counts = {}
+    for nm in _probe_outcomes:
+        oid = tokenizer.token2id.get(nm)
+        if oid is None:
+            continue
+        c = sum(1 for v in train_ds_p3.full_seq_by_pid.values()
+                if (v["position_ids"] == oid).any().item())
+        _probe_counts[nm] = c
+    print(f"[Data]: Phase-3 train label-source positives "
+          f"(outcome-anywhere, must be > truncation cliff): {_probe_counts}")
 
     # Persist processed datasets so the next architecture experiment skips the
     # CSV reading + DataProcessor transforms. Sampled smoke tests stay un-cached.

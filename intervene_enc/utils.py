@@ -1625,14 +1625,19 @@ def build_patient_labels(model, batch, training_settings, device):
     Method:  For each outcome k, label[b, k] = 1 iff the outcome appears
              anywhere in the GT trajectory of patient b. gt_time[b, k] is the
              first occurrence in hours from sequence start, clamped to the
-             training horizon. Both come straight from ``position_ids`` /
-             ``abs_ts`` — no extra collate needed.
+             training horizon. When the batch carries the un-truncated
+             ``full_position_ids`` / ``full_abs_ts`` (Phase-3 input-truncated
+             view), labels are derived from those so the prediction horizon
+             matches evaluation.py; otherwise they come from the same
+             ``position_ids`` / ``abs_ts`` the model consumed (Phase 1/2,
+             eval).
 
     Args:
         model              : InterveneEncoder (uses ``outcome_names`` and the
                              tokenizer for the outcome → token-id mapping).
         batch              : dict with ``position_ids`` [B, T] and ``abs_ts``
-                             [B, T] (normalised by 336 h).
+                             [B, T] (normalised by 336 h). May also carry
+                             ``full_position_ids`` / ``full_abs_ts`` (Phase 3).
         training_settings  : config — uses ``outcome_horizon_hours_p3`` for
                              the label clip (default 336 h).
         device             : torch device.
@@ -1649,8 +1654,15 @@ def build_patient_labels(model, batch, training_settings, device):
     )                                                              # [K]
     K = outcome_ids.numel()
 
-    pos_ids = batch["position_ids"]                                # [B, T]
-    abs_ts  = batch["abs_ts"]                                      # [B, T] normalised
+    # Prefer the un-truncated trajectory (Phase-3 input-truncated batches
+    # carry it explicitly). Falls back to the input sequence otherwise so
+    # Phase 1/2 and eval-time call sites are unchanged.
+    if "full_position_ids" in batch and "full_abs_ts" in batch:
+        pos_ids = batch["full_position_ids"]                       # [B, T_full]
+        abs_ts  = batch["full_abs_ts"]                             # [B, T_full] normalised
+    else:
+        pos_ids = batch["position_ids"]                            # [B, T]
+        abs_ts  = batch["abs_ts"]                                  # [B, T] normalised
     pad_mask = pos_ids != tok.pad_token_id                          # [B, T]
 
     # match[b, t, k] = 1 iff position (b, t) is the k-th outcome token, non-pad.

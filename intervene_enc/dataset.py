@@ -934,10 +934,17 @@ class EMRTokenizer:
 
 
 class EMRDataset(Dataset):
-    def __init__(self, processed_df: pd.DataFrame, context_df: pd.DataFrame, tokenizer: EMRTokenizer):
+    def __init__(self, processed_df: pd.DataFrame, context_df: pd.DataFrame, tokenizer: EMRTokenizer,
+                 label_source_df: pd.DataFrame = None):
         """
         processed_df: processed DataFrame after running DataProcessor.run() on the original temporal df.
         context_df: Also processed by DataProcessor.run().
+        label_source_df: Optional un-truncated trajectory DataFrame used to derive
+            patient-level labels when `processed_df` is an input-truncated view
+            (e.g. the Phase-3 48 h window). When provided, each sample carries
+            additional `full_position_ids` / `full_abs_ts` tensors that
+            `build_patient_labels` reads to derive outcome-anywhere labels;
+            the model's forward pass still consumes the truncated sequence.
 
         This class performs data cleaning, as well as prperation of data for input as train of for inference as test.
 
@@ -947,6 +954,10 @@ class EMRDataset(Dataset):
             self.tokens_df (pd.DataFrame): Long-format temporal event dataframe with per-token attributes and timing features.
             self.patient_ids (np.ndarray): Array of unique PatientIds present in the dataset.
             self.patient_groups (Dict[str, pd.DataFrame]): Mapping from PatientId to their corresponding token DataFrame.
+            self.full_seq_by_pid (Dict[str, Dict[str, Tensor]] or None): When
+                `label_source_df` is given, maps PatientId to a dict with the
+                un-truncated `position_ids` (long) and `abs_ts` (float, normalised
+                by 336 h) tensors. Else None.
         """
         self.tokenizer = tokenizer
         self.tokens_df = processed_df
@@ -980,6 +991,29 @@ class EMRDataset(Dataset):
         # which on the full 16.9M-row training split materialised 40k slice
         # DataFrames and overran the 46.6 GB cgroup during torch.save.
         self.patient_groups = dict(tuple(self.tokens_df.groupby("PatientId", sort=False)))
+
+        # ── Un-truncated label source (Phase-3 only) ───────────────────────
+        # Decouple the model's input window from the prediction-horizon label
+        # window. The Phase-3 input is truncated to PHASE3_INPUT_DAYS=2, but
+        # labels must reflect outcomes anywhere in the full 0–336 h trajectory
+        # (matching evaluation.py). Without this, RELEASE/DEATH tokens at hour
+        # ~159/~209 are sliced off the training sequence and the model is
+        # trained against near-empty positives for terminal outcomes.
+        self.full_seq_by_pid = None
+        if label_source_df is not None:
+            ls = label_source_df
+            if 'PositionID' not in ls.columns:
+                ls = ls.copy()
+                ls['PositionID'] = ls['PositionToken'].map(self.tokenizer.token2id) \
+                                                    .fillna(self.tokenizer.mask_token_id) \
+                                                    .astype(int)
+            self.full_seq_by_pid = {
+                pid: {
+                    "position_ids": torch.tensor(g["PositionID"].values, dtype=torch.long),
+                    "abs_ts": torch.tensor(g["TimePoint"].values, dtype=torch.float32) / 336.0,
+                }
+                for pid, g in ls.groupby("PatientId", sort=False)
+            }
 
     def __getstate__(self):
         # patient_groups is a redundant view over tokens_df: pickling 40k slice
@@ -1097,7 +1131,7 @@ class EMRDataset(Dataset):
                     f"(valid range [0, {max_raw_valid}])"
                 )
 
-        return {
+        sample = {
             "parent_raw_ids": parent_raw_ids,  # [T, P]
             "concept_ids": torch.tensor(df["ConceptID"].values, dtype=torch.long),
             "value_ids": torch.tensor(df["ValueID"].values, dtype=torch.long),
@@ -1106,6 +1140,15 @@ class EMRDataset(Dataset):
             "context_vec": torch.tensor(self.context_df.loc[pid].values, dtype=torch.float32),
             "targets": torch.tensor(df["PositionID"].values, dtype=torch.long),
         }
+        # Phase-3 only: attach the un-truncated trajectory tokens so
+        # build_patient_labels can derive outcome-anywhere labels even though
+        # the model's forward pass consumes the truncated sequence above.
+        if self.full_seq_by_pid is not None:
+            full = self.full_seq_by_pid.get(pid)
+            if full is not None:
+                sample["full_position_ids"] = full["position_ids"]
+                sample["full_abs_ts"]       = full["abs_ts"]
+        return sample
 
 
 def collate_emr(batch, pad_token_id=0):
@@ -1154,7 +1197,7 @@ def collate_emr(batch, pad_token_id=0):
     abs_ts         = pad_1d([x["abs_ts"] for x in batch], pad_val=0.0, dtype=torch.float32)
     context_vecs   = torch.stack([x["context_vec"] for x in batch])
 
-    return {
+    out = {
         "parent_raw_ids": parent_raw_ids,
         "concept_ids": concept_ids,
         "value_ids": value_ids,
@@ -1163,6 +1206,23 @@ def collate_emr(batch, pad_token_id=0):
         "context_vec": context_vecs,
         "targets": position_ids.clone(),
     }
+
+    # Phase-3 only: pad and propagate the un-truncated trajectory tensors for
+    # label derivation. These are NOT seen by the model forward pass — only
+    # by build_patient_labels.
+    if "full_position_ids" in batch[0]:
+        full_max_len = max(x["full_position_ids"].shape[0] for x in batch)
+        def pad_full(seqs, pad_val, dtype):
+            o = torch.full((batch_size, full_max_len), pad_val, dtype=dtype)
+            for i, s in enumerate(seqs):
+                o[i, :len(s)] = s
+            return o
+        out["full_position_ids"] = pad_full([x["full_position_ids"] for x in batch],
+                                            pad_val=pad_token_id, dtype=torch.long)
+        out["full_abs_ts"]       = pad_full([x["full_abs_ts"] for x in batch],
+                                            pad_val=0.0,          dtype=torch.float32)
+
+    return out
 
 
 class BucketBatchSampler(Sampler):
