@@ -1664,11 +1664,22 @@ def build_patient_labels(model, batch, training_settings, device):
 
     # match[b, t, k] = 1 iff position (b, t) is the k-th outcome token, non-pad.
     match = (pos_ids.unsqueeze(-1) == outcome_ids.view(1, 1, K)) & pad_mask.unsqueeze(-1)
+
+    # Restrict positives to events occurring AFTER the input observation
+    # window (default 48 h). Events inside the seed are observed tokens the
+    # model receives directly — treating them as positive labels trivially
+    # leaks the answer and inflates risk AUPRC, especially for HYPER /
+    # SEVERE_HYPER which often fire within 0–48 h. STraTS / GRU-D already
+    # use this post-window-only convention in their preprocess, so this
+    # restores a fair head-to-head label definition.
+    t_hours = abs_ts.unsqueeze(-1) * 336.0                          # [B, T, 1]
+    min_event_t = float(training_settings.get("outcome_min_event_hours_p3", 48.0))
+    match = match & (t_hours > min_event_t)                         # [B, T, K]
+
     present = match.any(dim=1)                                     # [B, K]
     labels  = present.float()
 
     # First occurrence time per (b, k): mask non-matches with +inf, then min.
-    t_hours = abs_ts.unsqueeze(-1) * 336.0                          # [B, T, 1]
     huge = torch.full_like(t_hours, float("inf"))
     t_masked = torch.where(match, t_hours, huge)
     first_t, _ = t_masked.min(dim=1)                                # [B, K]

@@ -81,15 +81,23 @@ def _min_positives(n_patients, threshold=EVAL_PREVALENCE_THRESHOLD):
 # Ground-truth extraction
 # ---------------------------------------------------------------------------
 
-def extract_ground_truth(eval_ds, outcome_names):
+def extract_ground_truth(eval_ds, outcome_names,
+                         min_event_time_hours=FORECAST_CUTOFF_HOURS):
     """
     Purpose: Per-patient first-occurrence times for each outcome.
     Method:  Scan each patient's full (untruncated) token sequence; record the
-             earliest TimePoint where its token appears as an outcome.
+             earliest TimePoint where its token appears as an outcome AND the
+             event occurs strictly after `min_event_time_hours`. Events inside
+             the input observation window are excluded so labels reflect what
+             the model must forecast, not what it observes in its input.
+             Default cutoff matches FORECAST_CUTOFF_HOURS (=EVAL_INPUT_DAYS*24,
+             48 h by default) and the STraTS / GRU-D preprocess convention.
 
     Args:
-        eval_ds       (EMRDataset): untruncated test dataset.
-        outcome_names (list[str]):  outcome tokens to collect.
+        eval_ds              (EMRDataset): untruncated test dataset.
+        outcome_names        (list[str]):  outcome tokens to collect.
+        min_event_time_hours (float):      strict lower bound; events at or
+                                          before this time are ignored.
 
     Returns:
         dict: {patient_id: {outcome_name: first_time_hours or np.inf}}.
@@ -104,16 +112,21 @@ def extract_ground_truth(eval_ds, outcome_names):
             tok = row[tok_col]
             if tok in outcome_set:
                 t = row["TimePoint"]
-                if t < patient_gt[tok]:
+                if t > min_event_time_hours and t < patient_gt[tok]:
                     patient_gt[tok] = t
         gt[pid] = patient_gt
     return gt
 
 
-def extract_ground_truth_episodes(eval_ds, outcome_names):
+def extract_ground_truth_episodes(eval_ds, outcome_names,
+                                  min_event_time_hours=FORECAST_CUTOFF_HOURS):
     """
     Purpose: Per-patient all-occurrence ground truth (list of times) per outcome.
-    Method:  Scan each patient's full (untruncated) token sequence.
+    Method:  Scan each patient's full (untruncated) token sequence; collect
+             only occurrences strictly after `min_event_time_hours`. Events
+             inside the input observation window are excluded so per-outcome
+             positives reflect the forecasting task. Matches the STraTS /
+             GRU-D preprocess label convention.
 
     Returns:
         dict: {patient_id: {outcome_name: [t1, t2, ...]}}.
@@ -126,7 +139,7 @@ def extract_ground_truth_episodes(eval_ds, outcome_names):
         patient_gt = {n: [] for n in outcome_names}
         for _, row in df.iterrows():
             tok = row[tok_col]
-            if tok in outcome_set:
+            if tok in outcome_set and row["TimePoint"] > min_event_time_hours:
                 patient_gt[tok].append(row["TimePoint"])
         gt[pid] = patient_gt
     return gt
