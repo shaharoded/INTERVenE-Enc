@@ -65,6 +65,10 @@ TRAINING_SETTINGS = {
         "ramp_epochs": {
             "dt":  0,              # no ramp; jump straight to λ_max once unlocked
         },
+        # Uncap dt (remove the global hard clamp here too). Numerically a no-op —
+        # dt's natural λ≈0.033 (raw dt ≫ main BCE) is far below 10 — but keeps the
+        # fraction-cap rule the sole governor, per the no-hard-clamp preference.
+        "max_lambda": {"dt": 400.0},
     },
 
     # Phase-2 auxiliary scheduler.
@@ -79,7 +83,7 @@ TRAINING_SETTINGS = {
         "main_only_epochs": 4,     # epochs of MLM-only training before t_pos/t_local activate
         "aux_fraction_caps": {
             "t_pos":   0.40,       # time-since-admission MSE capped at 40% of MLM CE
-            "t_local": 0.30,       # time-to-neighbour MSE capped at 30% of MLM CE
+            "t_local": 0.15,       # trimmed 0.30->0.15: reduce early MLM competition (t_pos uncapped adds pressure)
         },
         "order": [["t_pos", "t_local"]],   # single stage, both auxes unlock together
         "ramp_epochs": {
