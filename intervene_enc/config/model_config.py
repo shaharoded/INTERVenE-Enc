@@ -122,19 +122,19 @@ TRAINING_SETTINGS = {
     # phase3_time_lambda — weight of the per-outcome z-MSE time loss vs the
     # multi-label BCE risk loss. 0.5 keeps the time head on near-equal
     # footing with risk (matches STraTS / GRU-D's LoS-loss weight).
-    "phase3_time_lambda": 0.5,
+    "phase3_time_lambda": 0.1,   # was 0.5; time z-MSE dominated total/early-stop ~3:1, starved risk training
     "phase3_head_hidden": 256,
     # phase3_focal_gamma — focal-BCE on the risk head: loss is multiplied
     # by (1 − p_t)^γ, downweighting easy / confident examples so rare
     # positives (DEATH, SEVERE_HYPOGLYCEMIA) drive a larger share of the
     # gradient. 0 = plain BCE. 2.0 is the Lin et al. default.
-    "phase3_focal_gamma": 2.0,
+    "phase3_focal_gamma": 0.0,   # was 2.0; focal squashed risk logits to std~0.33 -> low AUPRC
     # phase3_cbm_p — Curriculum-by-Masking input-token replacement during
     # Phase-3 training. Masks `p` fraction of non-special positions with
     # [MASK] (BERT-style), targets/labels computed from the un-noised
     # batch. Forces the model to use multi-source signal, helps rare
     # outcomes. 0 disables.
-    "phase3_cbm_p": 0.25,
+    "phase3_cbm_p": 0.0,    # was 0.25; remove input noise for the clean-baseline retry
     # phase3_pool_dropout — dropout inside the Phase-3 attention pool +
     # shared MLP. ``None`` inherits the backbone's MODEL_CONFIG["dropout"].
     # 0.20 matches STraTS's attention_dropout.
@@ -144,5 +144,5 @@ TRAINING_SETTINGS = {
     # from the tokenizer. "uniform": pos_weight = 1 for every outcome.
     # The Exp-A ablation flips this to verify class-imbalance weighting
     # is still load-bearing once focal-BCE is layered on top.
-    "phase3_pos_weight_mode": "inv_prev",
+    "phase3_pos_weight_mode": "uniform",  # was inv_prev; plain-BCE clean baseline
 }
