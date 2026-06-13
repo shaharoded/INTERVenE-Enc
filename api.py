@@ -110,6 +110,12 @@ if __name__ == "__main__":
                          "to exist and reuse them; train Phase-3 only. Used for fast Phase-3 "
                          "sweeps (e.g., Exp-A loss/regulariser bundle) that don't change the "
                          "backbone or embedder.")
+    _p.add_argument("--phase3-full-input", dest="phase3_full_input", action="store_true",
+                    help="train Phase-3 on the full 0–336 h trajectory instead of the "
+                         f"first PHASE3_INPUT_DAYS days. Labels still come from the full "
+                         "trajectory (outcome-anywhere), matching evaluation.py. Use this "
+                         "to isolate the cost of the 48 h-training-signal change from "
+                         "the Stage-A bundle and other Phase-3 levers.")
     _CLI = _p.parse_args()
     if _CLI.smoke:
         TRAINING_SETTINGS.update({
@@ -446,6 +452,16 @@ train_dl, val_dl, train_dl_p3, val_dl_p3, tokenizer, test_raw = load_data(
     sample=TRAINING_SETTINGS.get("sample"),
     batch_size=TRAINING_SETTINGS["batch_size"],
 )
+
+# --phase3-full-input: swap the truncated Phase-3 loaders for the full-trajectory
+# ones (same that Phase 1 / 2 consume). Labels remain outcome-anywhere either
+# way — build_patient_labels uses full_position_ids when present (truncated
+# path) and falls back to position_ids otherwise (full-input path), which IS
+# the un-truncated trajectory, so the label semantics are identical.
+if _CLI is not None and getattr(_CLI, "phase3_full_input", False):
+    print("[Phase-3] --phase3-full-input: using full-trajectory loaders for Phase-3 "
+          "(overrides PHASE3_INPUT_DAYS truncation).")
+    train_dl_p3, val_dl_p3 = train_dl, val_dl
 
 # Auto-detect context vector dimension from the first batch
 for _batch in train_dl:
