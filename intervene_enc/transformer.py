@@ -907,7 +907,11 @@ def pretrain_transformer(model, train_dl, val_dl, resume=True,
 
         train_losses.append(tr_tot)
         val_losses.append(vl_tot)
-        print(f"[Phase-2] Epoch {epoch:03d}\n"
+        try:
+            _lr_now = scheduler.get_last_lr()[0]
+        except Exception:
+            _lr_now = optimizer.param_groups[0]["lr"]
+        print(f"[Phase-2] Epoch {epoch:03d}  lr={_lr_now:.3e}\n"
               f"    --> Train={tr_tot:.4f} (MLM={tr_mlm:.4f}  tPos={tr_tpos:.4f}  tLoc={tr_tlocal:.4f})\n"
               f"    --> Val  ={vl_tot:.4f} (MLM={vl_mlm:.4f}  tPos={vl_tpos:.4f}  tLoc={vl_tlocal:.4f})")
 

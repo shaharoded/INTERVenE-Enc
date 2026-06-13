@@ -156,6 +156,11 @@ class LambdaScheduleController:
         self.start_epoch = int(start_epoch)
         self._min_aux_loss = 1e-8
         self._max_lambda_clamp = 10.0
+        # Per-aux λ_max override. A trivially-solved / tiny-magnitude aux (e.g.
+        # t_local, raw MSE ~5e-4) wants λ ≫ 10 to reach its fraction_cap share of
+        # the main loss; the global 10 clamp pins it invisible. Allow specific
+        # auxes a higher ceiling via schedule_config["max_lambda"] = {name: cap}.
+        self._max_lambda_overrides = dict(schedule_config.get("max_lambda", {}))
 
         caps = schedule_config["aux_fraction_caps"]
         ramp_cfg = schedule_config.get("ramp_epochs", {})
@@ -305,7 +310,8 @@ class LambdaScheduleController:
             tr_aux = float(tr_aux_losses[name])
             if tr_aux > self._min_aux_loss:
                 lam = (spec["fraction"] * tr_main) / max(tr_aux, self._min_aux_loss)
-                spec["lambda_max"] = min(lam, self._max_lambda_clamp)
+                _clamp = self._max_lambda_overrides.get(name, self._max_lambda_clamp)
+                spec["lambda_max"] = min(lam, _clamp)
                 spec["anchor_main_loss"] = tr_main
                 spec["anchor_aux_loss"] = tr_aux
                 messages.append(
