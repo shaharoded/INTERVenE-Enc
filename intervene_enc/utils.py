@@ -1564,14 +1564,16 @@ def get_temporal_multi_hot_targets(
 # ---------------------------------------------------------------------------
 
 def time_to_neighbour_targets(abs_ts, pad_mask, mlm_mask, max_hours=24.0,
-                              min_gap_hours=1.0 / 60.0):
+                              min_gap_hours=2.0 / 3600.0):
     """
     Purpose: Build per-position local-gap targets for the time_to_neighbour aux.
     Method:  For each masked position, target = time gap (hours) to the nearest
              UNMASKED *non-adjacent* event, i.e. the nearest unmasked event whose
-             absolute time differs by more than ``min_gap_hours`` (default 1
-             min — skips same-timestamp/simultaneous labs but keeps the local
-             temporal rhythm). Rescaled to hours / ``max_hours``.
+             absolute time differs by more than ``min_gap_hours`` (default 2 s —
+             chosen empirically by cutoff sweep: target std plateaus at ~0.109
+             from 2 s onward [vs 0.094 at 0 s, degenerate floor 0.02]; 2 s skips
+             exact-simultaneous labs + the small sub-2 s TAK-ordering offset tail
+             while keeping the local temporal rhythm). Rescaled to hours/max_hours.
 
              Rationale: the previous definition used the immediately-adjacent
              unmasked event (min of prev/next gap). EMR events cluster at near-
