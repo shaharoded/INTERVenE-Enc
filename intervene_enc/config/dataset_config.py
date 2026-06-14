@@ -49,7 +49,7 @@ MEAL_TOKENS = ["MEAL_CONTEXT_Breakfast", "MEAL_CONTEXT_Lunch", "MEAL_CONTEXT_Din
 # Outcomes below this threshold are dropped — they have too few positive examples to learn from.
 OUTCOME_RARE_THRESHOLD_PCT = 1.0
 
-USE_QA_DATA = True   # QA ablation on best (full-outcome) model
+USE_QA_DATA = False  # QA ablation is not part of the current Stage A/B/C/D/E sweep
 # Observation window (hours from admission) the model is seeded with. Same window is
 # used to (a) aggregate QA ComplianceScore into context features and (b) define the
 # "post-observation" range over which outcome support is measured for rare-outcome

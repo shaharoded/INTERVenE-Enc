@@ -657,7 +657,6 @@ class EMRTokenizer:
         value2id (Dict[str, int]): Vocabulary mapping for concept+value tokens ("GLUCOSE_STATE_HIGH").
         special_tokens (List[str]): Special tokens (e.g. ["[PAD]", "[MASK]", "[NULL]"]).
         token_weights (torch.Tensor): Per-token loss weights; 0.0 for special/boundary tokens, 1.0 otherwise.
-        outcome_weights (torch.Tensor): Class-imbalance weights for the outcome BCE head.
         token_counts (torch.Tensor): Token counts (distribution).
         tokenid2parent_raw_ids (torch.Tensor): Lookup table mapping each PositionToken id
             to its parent raw-concept ids, padded to `parent_pad_len`.
@@ -670,7 +669,7 @@ class EMRTokenizer:
         Required special tokens are validated at init: `[PAD]`, `[MASK]`, `[NULL]`.
     """
     def __init__(self, token2id, rawconcept2id, concept2id, value2id, special_tokens,
-                 token_weights, outcome_weights, token_counts,
+                 token_weights, token_counts,
                  tokenid2parent_raw_ids, parent_pad_len,
                  outcome_patient_ratios=None):
         self.token2id = token2id
@@ -680,7 +679,6 @@ class EMRTokenizer:
         self.value2id = value2id
         self.special_tokens = special_tokens
         self.token_weights = token_weights
-        self.outcome_weights = outcome_weights
         self.token_counts = token_counts
         self.tokenid2parent_raw_ids = tokenid2parent_raw_ids
         self.parent_pad_len = parent_pad_len
@@ -771,11 +769,6 @@ class EMRTokenizer:
             if tok_id is not None:
                 token_weights[tok_id] = 0.0
         
-        # === Calculate Outcome Weights (Auxiliary Head) ===
-        # We calculate pos_weight based on Patient Prevalence.
-        # Logic: ratio of negative_patients / positive_patients
-        
-        outcome_weights = torch.ones(len(token2id), dtype=torch.float32)
         all_outcomes = list(set(OUTCOMES + TERMINAL_OUTCOMES))
 
         # Outcome support is measured only in the POST-observation portion of each
@@ -799,12 +792,8 @@ class EMRTokenizer:
             if out_tok not in token2id:
                 continue
 
-            tid = token2id[out_tok]
             n_pos = int(patient_tokens.apply(lambda s: out_tok in s).sum())
-            n_neg = total_patients - n_pos
             ratio = n_pos / max(total_patients, 1)
-
-            outcome_weights[tid] = float(n_neg / n_pos) if n_pos > 0 else 1.0
 
             if ratio * 100.0 >= OUTCOME_RARE_THRESHOLD_PCT:
                 outcome_patient_ratios[out_tok] = round(ratio, 6)
@@ -875,7 +864,7 @@ class EMRTokenizer:
             ids = encode_parent_names(pos_to_parents[tok])
             lut[tid, :len(ids)] = torch.tensor(ids, dtype=torch.long)
 
-        return cls(token2id, rawconcept2id, concept2id, value2id, special_tokens, token_weights, outcome_weights,
+        return cls(token2id, rawconcept2id, concept2id, value2id, special_tokens, token_weights,
                    counts_vec, lut, Pmax,
                    outcome_patient_ratios=outcome_patient_ratios)
 
@@ -887,7 +876,6 @@ class EMRTokenizer:
             'value2id': self.value2id,
             'special_tokens': self.special_tokens,
             'token_weights': self.token_weights,
-            'outcome_weights': self.outcome_weights,
             'token_counts': self.token_counts,
             'tokenid2parent_raw_ids': self.tokenid2parent_raw_ids,
             'parent_pad_len': self.parent_pad_len,
@@ -908,7 +896,6 @@ class EMRTokenizer:
             value2id=obj['value2id'],
             special_tokens=obj['special_tokens'],
             token_weights=obj['token_weights'].to(device),
-            outcome_weights=obj['outcome_weights'].to(device),
             token_counts=obj['token_counts'].to(device),
             tokenid2parent_raw_ids=obj['tokenid2parent_raw_ids'].to(device),
             parent_pad_len=obj['parent_pad_len'],
@@ -934,10 +921,17 @@ class EMRTokenizer:
 
 
 class EMRDataset(Dataset):
-    def __init__(self, processed_df: pd.DataFrame, context_df: pd.DataFrame, tokenizer: EMRTokenizer):
+    def __init__(self, processed_df: pd.DataFrame, context_df: pd.DataFrame, tokenizer: EMRTokenizer,
+                 label_source_df: pd.DataFrame = None):
         """
         processed_df: processed DataFrame after running DataProcessor.run() on the original temporal df.
         context_df: Also processed by DataProcessor.run().
+        label_source_df: Optional un-truncated trajectory DataFrame used to derive
+            patient-level labels when `processed_df` is an input-truncated view
+            (e.g. the Phase-3 48 h window). When provided, each sample carries
+            additional `full_position_ids` / `full_abs_ts` tensors that
+            `build_patient_labels` reads to derive outcome-anywhere labels;
+            the model's forward pass still consumes the truncated sequence.
 
         This class performs data cleaning, as well as prperation of data for input as train of for inference as test.
 
@@ -947,6 +941,10 @@ class EMRDataset(Dataset):
             self.tokens_df (pd.DataFrame): Long-format temporal event dataframe with per-token attributes and timing features.
             self.patient_ids (np.ndarray): Array of unique PatientIds present in the dataset.
             self.patient_groups (Dict[str, pd.DataFrame]): Mapping from PatientId to their corresponding token DataFrame.
+            self.full_seq_by_pid (Dict[str, Dict[str, Tensor]] or None): When
+                `label_source_df` is given, maps PatientId to a dict with the
+                un-truncated `position_ids` (long) and `abs_ts` (float, normalised
+                by 336 h) tensors. Else None.
         """
         self.tokenizer = tokenizer
         self.tokens_df = processed_df
@@ -980,6 +978,29 @@ class EMRDataset(Dataset):
         # which on the full 16.9M-row training split materialised 40k slice
         # DataFrames and overran the 46.6 GB cgroup during torch.save.
         self.patient_groups = dict(tuple(self.tokens_df.groupby("PatientId", sort=False)))
+
+        # ── Un-truncated label source (Phase-3 only) ───────────────────────
+        # Decouple the model's input window from the prediction-horizon label
+        # window. The Phase-3 input is truncated to PHASE3_INPUT_DAYS=2, but
+        # labels must reflect outcomes anywhere in the full 0–336 h trajectory
+        # (matching evaluation.py). Without this, RELEASE/DEATH tokens at hour
+        # ~159/~209 are sliced off the training sequence and the model is
+        # trained against near-empty positives for terminal outcomes.
+        self.full_seq_by_pid = None
+        if label_source_df is not None:
+            ls = label_source_df
+            if 'PositionID' not in ls.columns:
+                ls = ls.copy()
+                ls['PositionID'] = ls['PositionToken'].map(self.tokenizer.token2id) \
+                                                    .fillna(self.tokenizer.mask_token_id) \
+                                                    .astype(int)
+            self.full_seq_by_pid = {
+                pid: {
+                    "position_ids": torch.tensor(g["PositionID"].values, dtype=torch.long),
+                    "abs_ts": torch.tensor(g["TimePoint"].values, dtype=torch.float32) / 336.0,
+                }
+                for pid, g in ls.groupby("PatientId", sort=False)
+            }
 
     def __getstate__(self):
         # patient_groups is a redundant view over tokens_df: pickling 40k slice
@@ -1097,7 +1118,7 @@ class EMRDataset(Dataset):
                     f"(valid range [0, {max_raw_valid}])"
                 )
 
-        return {
+        sample = {
             "parent_raw_ids": parent_raw_ids,  # [T, P]
             "concept_ids": torch.tensor(df["ConceptID"].values, dtype=torch.long),
             "value_ids": torch.tensor(df["ValueID"].values, dtype=torch.long),
@@ -1106,6 +1127,15 @@ class EMRDataset(Dataset):
             "context_vec": torch.tensor(self.context_df.loc[pid].values, dtype=torch.float32),
             "targets": torch.tensor(df["PositionID"].values, dtype=torch.long),
         }
+        # Phase-3 only: attach the un-truncated trajectory tokens so
+        # build_patient_labels can derive outcome-anywhere labels even though
+        # the model's forward pass consumes the truncated sequence above.
+        if self.full_seq_by_pid is not None:
+            full = self.full_seq_by_pid.get(pid)
+            if full is not None:
+                sample["full_position_ids"] = full["position_ids"]
+                sample["full_abs_ts"]       = full["abs_ts"]
+        return sample
 
 
 def collate_emr(batch, pad_token_id=0):
@@ -1154,7 +1184,7 @@ def collate_emr(batch, pad_token_id=0):
     abs_ts         = pad_1d([x["abs_ts"] for x in batch], pad_val=0.0, dtype=torch.float32)
     context_vecs   = torch.stack([x["context_vec"] for x in batch])
 
-    return {
+    out = {
         "parent_raw_ids": parent_raw_ids,
         "concept_ids": concept_ids,
         "value_ids": value_ids,
@@ -1163,6 +1193,23 @@ def collate_emr(batch, pad_token_id=0):
         "context_vec": context_vecs,
         "targets": position_ids.clone(),
     }
+
+    # Phase-3 only: pad and propagate the un-truncated trajectory tensors for
+    # label derivation. These are NOT seen by the model forward pass — only
+    # by build_patient_labels.
+    if "full_position_ids" in batch[0]:
+        full_max_len = max(x["full_position_ids"].shape[0] for x in batch)
+        def pad_full(seqs, pad_val, dtype):
+            o = torch.full((batch_size, full_max_len), pad_val, dtype=dtype)
+            for i, s in enumerate(seqs):
+                o[i, :len(s)] = s
+            return o
+        out["full_position_ids"] = pad_full([x["full_position_ids"] for x in batch],
+                                            pad_val=pad_token_id, dtype=torch.long)
+        out["full_abs_ts"]       = pad_full([x["full_abs_ts"] for x in batch],
+                                            pad_val=0.0,          dtype=torch.float32)
+
+    return out
 
 
 class BucketBatchSampler(Sampler):

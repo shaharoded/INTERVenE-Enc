@@ -26,7 +26,7 @@ TRAINING_SETTINGS = {
     "phase1_n_epochs": 100,
     "phase2_n_epochs": 100,
     "phase3_n_epochs": 100,
-    "sample": None,  # For smoke tests.
+    "sample": None,
 
     # Phase-2 optimizer LR warmup (OneCycleLR pct_start).
     # This controls optimizer step size ramp-up, not auxiliary-loss lambda warmup.
@@ -37,7 +37,7 @@ TRAINING_SETTINGS = {
     "phase1_learning_rate":       3e-4,
     "phase2_learning_rate":       3e-4,
     "phase3_learning_rate":       1e-4,
-    "phase3_backbone_lr_factor":  0.01,  # backbone LR = phase3_lr * factor (1e-6); 0.0 = fully frozen
+    "phase3_backbone_lr_factor":  0.1,   # was 0.01 (near-frozen); unfreeze so P3 backbone adapts  # backbone LR = phase3_lr * factor (1e-6); 0.0 = fully frozen
     "phase3_weight_decay":        1e-3,  # weight decay for outcome_head in P3 (matches backbone)
     "weight_decay":               1e-3,
 
@@ -65,6 +65,10 @@ TRAINING_SETTINGS = {
         "ramp_epochs": {
             "dt":  0,              # no ramp; jump straight to λ_max once unlocked
         },
+        # Uncap dt (remove the global hard clamp here too). Numerically a no-op —
+        # dt's natural λ≈0.033 (raw dt ≫ main BCE) is far below 10 — but keeps the
+        # fraction-cap rule the sole governor, per the no-hard-clamp preference.
+        "max_lambda": {"dt": 400.0},
     },
 
     # Phase-2 auxiliary scheduler.
@@ -79,13 +83,20 @@ TRAINING_SETTINGS = {
         "main_only_epochs": 4,     # epochs of MLM-only training before t_pos/t_local activate
         "aux_fraction_caps": {
             "t_pos":   0.40,       # time-since-admission MSE capped at 40% of MLM CE
-            "t_local": 0.30,       # time-to-neighbour MSE capped at 30% of MLM CE
+            "t_local": 0.15,       # trimmed 0.30->0.15: reduce early MLM competition (t_pos uncapped adds pressure)
         },
         "order": [["t_pos", "t_local"]],   # single stage, both auxes unlock together
         "ramp_epochs": {
             "t_pos":   0,          # no ramp; jump to λ_max at unlock
             "t_local": 0,
         },
+        # Per-aux λ_max ceiling (overrides the global hard clamp of 10). The
+        # global clamp is a safety against a tiny-magnitude aux getting a runaway
+        # λ from the fraction rule (λ = fraction_cap × MLM/aux). Both time auxes
+        # are now uncapped so the fraction-cap rule alone governs their weight:
+        #   t_local → λ≈61 (0.30 share);  t_pos → λ≈41 (0.40 share).
+        # (Phase-1 `dt` keeps the default-10 safety; it's tiny and never binds.)
+        "max_lambda": {"t_local": 400.0, "t_pos": 400.0},
     },
 
     # Outcome head — time-decayed soft labels.
@@ -119,8 +130,19 @@ TRAINING_SETTINGS = {
     # ("aux_fraction_caps": {"t_pos": …, "t_local": …}) — see above.
 
     # --- Phase-3 settings ---
-    # Per-outcome time MAE is part of the headline; weight the smooth-L1 high
-    # enough that it keeps pace with the risk BCE.
-    "phase3_time_lambda": 0.02,
+    # phase3_time_lambda — weight of the per-outcome z-MSE time loss vs the
+    # multi-label BCE risk loss. 0.5 keeps the time head on near-equal
+    # footing with risk (matches STraTS / GRU-D's LoS-loss weight).
+    "phase3_time_lambda": 0.1,
     "phase3_head_hidden": 256,
+    # phase3_cbm_p — Curriculum-by-Masking input-token replacement during
+    # Phase-3 training. Masks `p` fraction of non-special positions with
+    # [MASK] (BERT-style), targets/labels computed from the un-noised
+    # batch. Forces the model to use multi-source signal, helps rare
+    # outcomes. 0 disables.
+    "phase3_cbm_p": 0.0,
+    # phase3_pool_dropout — dropout inside the Phase-3 attention pool +
+    # shared MLP. ``None`` inherits the backbone's MODEL_CONFIG["dropout"].
+    # 0.20 matches STraTS's attention_dropout.
+    "phase3_pool_dropout": 0.20,
 }

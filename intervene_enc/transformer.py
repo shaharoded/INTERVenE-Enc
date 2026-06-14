@@ -389,7 +389,7 @@ class InterveneEncoder(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
     # ------------------------------------------- task-head attachment ---- #
-    def attach_task_heads(self, hidden=256, n_heads=4):
+    def attach_task_heads(self, hidden=256, n_heads=4, dropout=None):
         """
         Purpose: Build the Phase-3 :class:`TaskHeads` module with RELEASE
                  excluded from the risk targets and kept on the time head.
@@ -400,6 +400,10 @@ class InterveneEncoder(nn.Module):
         Args:
             hidden  (int): MLP hidden width.
             n_heads (int): heads in the pool's MultiheadAttention.
+            dropout (float|None): dropout used inside the pool + shared MLP.
+                ``None`` (default) inherits the backbone's ``cfg['dropout']``;
+                pass an explicit value (e.g., 0.20) to regularise the Phase-3
+                head independently of the backbone.
 
         Returns:
             self.task_heads (TaskHeads).
@@ -416,13 +420,14 @@ class InterveneEncoder(nn.Module):
             risk_idx = all_idx.clone()
         time_idx = all_idx
 
+        pool_dropout = self.cfg["dropout"] if dropout is None else float(dropout)
         self.task_heads = TaskHeads(
             d_model=self.cfg["embed_dim"],
             n_outcomes=K,
             risk_idx_buf=risk_idx,
             time_idx_buf=time_idx,
             hidden=hidden,
-            dropout=self.cfg["dropout"],
+            dropout=pool_dropout,
             n_heads=n_heads,
         )
         # Match the device of the rest of the module so Phase-3 finetune does
@@ -902,7 +907,11 @@ def pretrain_transformer(model, train_dl, val_dl, resume=True,
 
         train_losses.append(tr_tot)
         val_losses.append(vl_tot)
-        print(f"[Phase-2] Epoch {epoch:03d}\n"
+        try:
+            _lr_now = scheduler.get_last_lr()[0]
+        except Exception:
+            _lr_now = optimizer.param_groups[0]["lr"]
+        print(f"[Phase-2] Epoch {epoch:03d}  lr={_lr_now:.3e}\n"
               f"    --> Train={tr_tot:.4f} (MLM={tr_mlm:.4f}  tPos={tr_tpos:.4f}  tLoc={tr_tlocal:.4f})\n"
               f"    --> Val  ={vl_tot:.4f} (MLM={vl_mlm:.4f}  tPos={vl_tpos:.4f}  tLoc={vl_tlocal:.4f})")
 
@@ -945,16 +954,14 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
              per-outcome (risk, time) prediction.
     Method:  Per-batch:
                • encode + pool → (risk_logits, time_pred);
-               • risk loss = ``BCEWithLogitsLoss`` with per-outcome
-                 ``pos_weight`` derived from training-set prevalence;
+               • risk loss = ``BCEWithLogitsLoss`` (multi-label, mean-reduced);
                • time loss = Smooth-L1 over positive-only patients;
              Backbone uses ``phase3_backbone_lr_factor`` LR, task heads use the
              full ``phase3_learning_rate``.
 
     Args:
         model (InterveneEncoder): Phase-2 best ckpt loaded.
-        train_dl / val_dl : DataLoaders (natural distribution; ``pos_weight``
-                            handles imbalance).
+        train_dl / val_dl : DataLoaders (natural distribution).
         resume (bool): resume from ``ckpt_last`` if present.
         checkpoint_path (str): destination for the best Phase-3 checkpoint.
         training_settings (dict): config — uses ``phase3_learning_rate``,
@@ -972,7 +979,10 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
 
     # Attach task heads (idempotent — checks .task_heads is None).
     if model.task_heads is None:
-        model.attach_task_heads(hidden=training_settings.get("phase3_head_hidden", 256))
+        model.attach_task_heads(
+            hidden=training_settings.get("phase3_head_hidden", 256),
+            dropout=training_settings.get("phase3_pool_dropout"),
+        )
 
     ckpt_path = Path(checkpoint_path).resolve()
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -983,17 +993,11 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
         if pre.get("training_settings") is not None:
             training_settings = pre["training_settings"]
 
-    # Per-outcome pos_weight from training prevalence:
-    # tokenizer.outcome_weights holds n_neg/n_pos at the token id.
-    tok = model.embedder.tokenizer
     risk_idx_cpu = model.task_heads.risk_idx.cpu().tolist()
     risk_outcome_names = [model.outcome_names[i] for i in risk_idx_cpu]
-    pos_weight = torch.tensor(
-        [tok.outcome_weights[tok.token2id[n]].item() for n in risk_outcome_names],
-        dtype=torch.float32, device=device,
-    )
 
-    risk_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction="mean")
+    def risk_criterion(logits, targets):
+        return F.binary_cross_entropy_with_logits(logits, targets)
 
     optimizer = model.configure_optimizers(
         weight_decay=training_settings.get("phase3_weight_decay", 1e-3),
@@ -1023,6 +1027,66 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
     lambda_time = training_settings.get("phase3_time_lambda", 0.5)
     grad_accum_steps = training_settings.get("grad_accumulation_steps", 1)
 
+    # CBM-style input-token replacement during Phase-3 training (regularizer).
+    # Masks a random p-fraction of non-special positions with [MASK] before
+    # the encoder sees them; targets/labels are computed from the original
+    # batch so the supervised contract is preserved. p = 0 disables it.
+    phase3_cbm_p = float(training_settings.get("phase3_cbm_p", 0.0))
+    if phase3_cbm_p > 0.0:
+        cbm_luts = build_luts(model.embedder.tokenizer)
+        cbm_luts = {k: (v.to(device) if torch.is_tensor(v) else v)
+                    for k, v in cbm_luts.items()}
+        cbm_forbid_ids = cbm_luts["forbid_mask_ids"]
+        print(f"[Phase-3] CBM input dropout enabled at p={phase3_cbm_p}")
+    else:
+        cbm_luts = None
+        cbm_forbid_ids = None
+
+    # ─── Per-outcome time statistics (train-only) ──────────────────────── #
+    # Computed once before training. Used to z-score gt_time and time_pred
+    # inside the time loss so MSE gradients sit at a consistent unit scale
+    # for every outcome (RELEASE's ~150 h spread vs HYPERGLYCEMIA's ~60 h
+    # spread mustn't make RELEASE's gradient ~6× larger just because of
+    # raw scale). Outcomes are aggregated with a uniform mean across
+    # time-bearing outcomes — no per-outcome reweighting.
+    # The head still emits raw hours via softplus; this normalisation
+    # lives entirely in the loss, leaving the eval contract intact.
+    time_idx_cpu = model.task_heads.time_idx.cpu().tolist()
+    K_time = len(time_idx_cpu)
+    print(f"[Phase-3] computing per-outcome time stats over {len(train_dl)} train batches...")
+    pos_times_buf = [[] for _ in range(K_time)]
+    with torch.no_grad():
+        for batch in tqdm(train_dl, desc="time-stats", leave=False,
+                          mininterval=5.0, miniters=10, dynamic_ncols=True):
+            batch = {k: v.to(device) for k, v in batch.items()}
+            labels_b, gt_time_b, _ = build_patient_labels(
+                model, batch, training_settings, device,
+            )
+            for j, k in enumerate(time_idx_cpu):
+                mask = (labels_b[:, k] == 1) & torch.isfinite(gt_time_b[:, k])
+                if mask.any():
+                    pos_times_buf[j].append(gt_time_b[mask, k].float().cpu())
+
+    n_pos_per, mean_per, std_per = [], [], []
+    for j in range(K_time):
+        if pos_times_buf[j]:
+            cat = torch.cat(pos_times_buf[j])
+            n_pos_per.append(int(cat.numel()))
+            mean_per.append(float(cat.mean().item()))
+            std_per.append(float(cat.std().item()) if cat.numel() > 1 else 1.0)
+        else:
+            n_pos_per.append(0); mean_per.append(0.0); std_per.append(1.0)
+    # Floor std at 1 h so a degenerate outcome doesn't divide by ~0.
+    std_per = [max(s, 1.0) for s in std_per]
+    time_mean = torch.tensor(mean_per, dtype=torch.float32, device=device)
+    time_std  = torch.tensor(std_per,  dtype=torch.float32, device=device)
+
+    print("[Phase-3] per-outcome time stats (used inside the time loss only):")
+    for j, k in enumerate(time_idx_cpu):
+        name = model.outcome_names[k]
+        print(f"[Phase-3]   {name:<32s} n_pos={n_pos_per[j]:>5d}  "
+              f"mean={mean_per[j]:>7.2f}h  std={std_per[j]:>7.2f}h")
+
     def run_epoch(loader, train_flag):
         model.train() if train_flag else model.eval()
         total_loss = total_risk = total_time = 0.0
@@ -1041,14 +1105,26 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
                 risk_idx = model.task_heads.risk_idx.to(device)
                 time_idx = model.task_heads.time_idx.to(device)
 
+                # CBM input-token replacement (training-time only). Labels
+                # were computed above from the un-noised batch; the encoder
+                # then sees the noised sequence so it can't lean on a single
+                # strong predictor token.
+                if train_flag and phase3_cbm_p > 0.0:
+                    batch_for_model, _, _ = apply_mlm_mask(
+                        batch=batch, tokenizer=model.embedder.tokenizer,
+                        forbid_ids=cbm_forbid_ids, luts=cbm_luts, p=phase3_cbm_p,
+                    )
+                else:
+                    batch_for_model = batch
+
                 with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
                     risk_logits, time_pred, _, _ = model.predict(
-                        parent_raw_ids=batch["parent_raw_ids"],
-                        concept_ids=batch["concept_ids"],
-                        value_ids=batch["value_ids"],
-                        position_ids=batch["position_ids"],
-                        abs_ts=batch["abs_ts"],
-                        context_vec=batch["context_vec"],
+                        parent_raw_ids=batch_for_model["parent_raw_ids"],
+                        concept_ids=batch_for_model["concept_ids"],
+                        value_ids=batch_for_model["value_ids"],
+                        position_ids=batch_for_model["position_ids"],
+                        abs_ts=batch_for_model["abs_ts"],
+                        context_vec=batch_for_model["context_vec"],
                     )
                 risk_logits = risk_logits.float()
                 time_pred   = time_pred.float()
@@ -1057,14 +1133,37 @@ def finetune_transformer(model, train_dl, val_dl, resume=True,
                 risk_labels = labels[:, risk_idx]                  # [B, K_risk]
                 risk_loss = risk_criterion(risk_logits, risk_labels)
 
-                # Time loss — Smooth-L1 only at positive (label=1) entries.
-                time_labels_full = labels[:, time_idx]              # [B, K_time]
-                time_target_full = gt_time[:, time_idx]
-                pos_mask = time_labels_full.bool()
+                # Time loss — per-outcome MSE in z-space, masked to positives.
+                #
+                # The old Smooth-L1 over raw hours was L1 in practice (its
+                # quadratic region ends at 1 h; every realistic time error
+                # is well past that), which is happy at the conditional
+                # median and exerts no gradient pressure to predict
+                # per-patient variance — letting the head collapse to a
+                # near-constant ~47 h for every patient.
+                #
+                # MSE on a per-outcome z-normalised target (a) makes the
+                # gradient scale invariant across outcomes (RELEASE's
+                # ~150 h spread no longer dominates HYPERGLYCEMIA's ~60 h
+                # one) and (b) penalises under-dispersion quadratically,
+                # forcing the head to use input features to spread its
+                # predictions. The inverse-frequency outcome weight then
+                # restores per-outcome footing so DEATH (n_pos ≈ 1.1 k)
+                # isn't drowned by HYPERGLYCEMIA (n_pos ≈ 3.2 k).
+                time_labels_full = labels[:, time_idx]                # [B, K_time]
+                time_target_full = gt_time[:, time_idx]               # [B, K_time], hours
+                pos_mask = time_labels_full.bool() & torch.isfinite(time_target_full)
                 if pos_mask.any():
-                    time_loss = F.smooth_l1_loss(
-                        time_pred[pos_mask], time_target_full[pos_mask], reduction="mean",
-                    )
+                    # Broadcast per-outcome stats over the batch axis.
+                    z_pred = (time_pred       - time_mean) / time_std
+                    z_tgt  = (time_target_full - time_mean) / time_std
+                    sq = ((z_pred - z_tgt) ** 2) * pos_mask.float()
+                    per_outcome_n  = pos_mask.float().sum(dim=0)                # [K_time]
+                    per_outcome_sq = sq.sum(dim=0)                              # [K_time]
+                    per_outcome_mse = per_outcome_sq / per_outcome_n.clamp(min=1.0)
+                    has_any = (per_outcome_n > 0).float()
+                    # Uniform mean across outcomes that had any positives in this batch.
+                    time_loss = (per_outcome_mse * has_any).sum() / has_any.sum().clamp(min=1.0)
                 else:
                     time_loss = time_pred.sum() * 0.0
 

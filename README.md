@@ -101,7 +101,7 @@ The training contract:
 - **Scaler is fit on train** (saved to `checkpoints/scaler.pkl`) and reused on val/test.
 - **Tokenizer** is built once from train and cached at `checkpoints/tokenizer.pt`.
 - **Phase 1 caching**: when `(embed_dim, time2vec_dim, ctx_dim)` match the cached Phase-1 checkpoint, the embedder is reused and Phase 1 is skipped — Phase 2/3 are always retrained on each call.
-- **DataLoaders**: Phase 1 + Phase 3 use bucket-batched natural distribution; Phase 2 uses a weighted bucket sampler so rare outcomes get balanced exposure (`pos_weight` is omitted there because the sampler already rebalances).
+- **DataLoaders**: Phase 1 + Phase 3 use bucket-batched natural distribution; Phase 2 uses a weighted bucket sampler so rare outcomes get balanced exposure.
 
 Model checkpoints are saved under `checkpoints/phase1/`, `checkpoints/phase2/`, and `checkpoints/phase3/`. Each phase function (`train_embedder`, `pretrain_transformer`, `finetune_transformer`) can be invoked directly.
 
@@ -123,7 +123,7 @@ tokenizer = EMRTokenizer.load(Path(CHECKPOINT_PATH) / "tokenizer.pt")
 scaler = joblib.load(Path(CHECKPOINT_PATH) / "scaler.pkl")
 
 # Preprocess test data, truncated to the same input window used during Phase-3 alignment
-processor = DataProcessor(df, ctx_df, scaler=scaler, tak_repo_path=TAK_REPO_PATH, max_input_days=5)
+processor = DataProcessor(df, ctx_df, scaler=scaler, tak_repo_path=TAK_REPO_PATH, max_input_days=2)
 df, ctx_df = processor.run()
 dataset_input = EMRDataset(df, ctx_df, tokenizer=tokenizer)
 
@@ -224,7 +224,7 @@ Per-patient Event Tokenization (with normalized absolute timestamps)
 │
 ▼
 🎯 Phase 3 – Attach `TaskHeads` (per-outcome attention pool + shared MLP) and fine-tune for per-patient
-             risk (multi-label BCE with `pos_weight`) and time-to-event regression (smooth-L1 on positives).
+             risk (multi-label BCE) and time-to-event regression (per-outcome z-MSE on positives).
              Backbone is at `phase3_backbone_lr_factor` LR.
 │
 ▼
@@ -286,7 +286,7 @@ The training uses next-token prediction loss (temporal-window BCE) + time-delta 
 | `PerOutcomeAttnPool` | K learnable outcome queries cross-attend over the encoder output to produce one pooled feature per (patient, outcome). |
 | `TaskHeads` | Phase-3 head module: `PerOutcomeAttnPool` → shared MLP → (risk_head, time_head). RELEASE is dropped from `risk_head` (reported as `1 − P(DEATH)`) and kept on `time_head` as length-of-stay regression. |
 | `pretrain_transformer()` | Phase-2 MLM pre-training. Main loss: full-vocab cross-entropy on positions selected by `apply_mlm_mask` (atomic-interval-aware, hierarchical replacement tokens). Aux losses (`t_pos`, `t_local`) scheduled by `LambdaScheduleController` with per-aux fraction caps. |
-| `finetune_transformer()` | Phase-3 outcome + time fine-tune. Backbone held at `phase3_backbone_lr_factor` LR; task heads at full `phase3_learning_rate`. Risk loss = `BCEWithLogitsLoss` with per-outcome `pos_weight` from training prevalence. Time loss = `smooth_l1_loss` over positive patients only, `λ_time` configurable via `phase3_time_lambda`. |
+| `finetune_transformer()` | Phase-3 outcome + time fine-tune. Backbone held at `phase3_backbone_lr_factor` LR; task heads at full `phase3_learning_rate`. Risk loss = plain `BCEWithLogitsLoss` (no class weighting). Time loss = per-outcome z-MSE over positive patients only, `λ_time` configurable via `phase3_time_lambda`. |
 
 ⚙️ **Phase 2: Bidirectional MLM pre-training**
 The encoder learns event semantics from corrupted context. At each step:
@@ -294,15 +294,15 @@ The encoder learns event semantics from corrupted context. At each step:
 - `apply_mlm_mask` (in `utils.py`) samples ~15% of eligible positions. Interval START/END pairs are masked atomically and replaced with `[MASK_INTERVAL_START]` / `[MASK_INTERVAL_END]`; other tokens become `[MASK]`. The original token id is retained as the CE target.
 - **Main loss**: full-vocab cross-entropy at the masked positions only.
 - **`t_pos` aux**: at every non-pad position, regress normalised time-since-admission (MSE) — forces the hidden state to retain global temporal placement.
-- **`t_local` aux**: at masked positions only, regress `min(t−t_prev, t_next−t) / 24h` — forces masked tokens to retain local-time context after their concept identity is hidden.
+- **`t_local` aux**: at masked positions only, regress the time gap (hours, /24h) to the nearest **non-simultaneous** unmasked event — neighbours within `min_gap_hours` (default 2 s) of the masked position are skipped, since EMR systems log batched events at identical timestamps and the adjacent-only target is otherwise near-degenerate (std ≈ 0.02). Forces masked tokens to retain local-time context after their concept identity is hidden.
 - The embedder is trainable in Phase 2 at 10× lower LR than the backbone.
 
 ⚙️ **Phase 3: Outcome + time fine-tune**
 Phase 3 attaches `TaskHeads` on top of the Phase-2-best encoder and trains:
 
-- **Risk**: multi-label `BCEWithLogitsLoss` over the K−1 risk-indexed outcomes (RELEASE dropped). Per-outcome `pos_weight` derived from training-set prevalence; natural-distribution batches.
-- **Time**: smooth-L1 between the K time-head outputs and the first-occurrence hours from sequence start, restricted to positive patients per outcome. RELEASE's slot is trained on patients who were released within the horizon — at inference it serves as length-of-stay regression.
-- Backbone runs at `phase3_learning_rate × phase3_backbone_lr_factor` (default `0.01`).
+- **Risk**: multi-label `BCEWithLogitsLoss` over the K−1 risk-indexed outcomes (RELEASE dropped). Plain BCE (no class weighting); natural-distribution batches. Positives are restricted to outcomes occurring **strictly after** the input observation window (`outcome_min_event_hours_p3`, default 48 h) — events inside the seed window are observed input, not forecasting targets.
+- **Time**: per-outcome z-MSE between the K time-head outputs and the first-occurrence hours from sequence start, restricted to positive patients per outcome. RELEASE's slot is trained on patients who were released within the horizon — at inference it serves as length-of-stay regression.
+- Backbone runs at `phase3_learning_rate × phase3_backbone_lr_factor` (default `0.1`).
 - `λ_time` defaults to `0.1` and is controlled by `phase3_time_lambda`.
 
 ---
@@ -321,7 +321,7 @@ NOTE: Inference is a single forward pass per patient — substantially faster th
 
 End-to-end evaluation on the held-out test split: re-process raw test data with the fitted scaler, build a 2-day truncated seed dataset, run a single encoder pass per patient via `inference.predict`, then score.
 
-Headline framing is **patient-level AUROC / AUPRC / F1** — each (patient, outcome) contributes a single `(P_<outcome>, did_it_ever_occur)` pair, so rare outcomes stay stable without per-window count noise. `RELEASE_EVENT` is excluded from the AUC headline (it is the negation of DEATH in this cohort) and reported separately via length-of-stay MAE.
+Headline framing is **patient-level AUROC / AUPRC / F1** — each (patient, outcome) contributes a single `(P_<outcome>, did_it_occur_in_the_forecast_window)` pair, where the forecast window is `(min_event_time_hours, ∞)` (default 48 h). Events inside the input seed window are excluded from positive labels so the metric reflects forecasting, not detection of observed events. Rare outcomes stay stable without per-window count noise. `RELEASE_EVENT` is excluded from the AUC headline (it is the negation of DEATH in this cohort) and reported separately via length-of-stay MAE.
 
 | Component           | Role                                                                                              |
 |--------------------|---------------------------------------------------------------------------------------------------|

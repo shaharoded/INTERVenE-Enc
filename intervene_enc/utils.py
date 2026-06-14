@@ -6,6 +6,7 @@ General util functions for the package
 """
 import sys
 import os
+import tempfile
 import datetime
 import functools
 import inspect
@@ -75,11 +76,13 @@ def _ensure_tee_active():
     global _active_tee
     if _active_tee is not None:
         return
-    # Tee log goes to /tmp (local fs) — the workspace mfs has intermittent OSError [Errno 5]
-    # that crashes training mid-run. stdout redirect to /tmp/run.log already captures everything.
-    # Per-uid filename so a stale root-owned /tmp/training.log from a prior run does not
-    # block this process with PermissionError.
-    log_path = f"/tmp/training_{os.getuid()}.log"
+    # Tee log goes to the system temp dir (local fs) — the workspace mfs has intermittent
+    # OSError [Errno 5] that crashes training mid-run. stdout redirect already captures everything.
+    # Per-uid filename so a stale root-owned training.log from a prior run on a shared Linux pod
+    # does not block this process with PermissionError. getuid is POSIX-only — fall back to pid
+    # on Windows so local validation runs.
+    _uid = os.getuid() if hasattr(os, "getuid") else os.getpid()
+    log_path = os.path.join(tempfile.gettempdir(), f"training_{_uid}.log")
     _active_tee = _TeeStream(log_path, sys.stdout)
     sys.stdout = _active_tee
     print(f"[Logger] Logging to: {log_path}")
@@ -1560,57 +1563,54 @@ def get_temporal_multi_hot_targets(
 # Tensor helpers shared by the Phase-2 / Phase-3 training loops + diagnose
 # ---------------------------------------------------------------------------
 
-def time_to_neighbour_targets(abs_ts, pad_mask, mlm_mask, max_hours=24.0):
+def time_to_neighbour_targets(abs_ts, pad_mask, mlm_mask, max_hours=24.0,
+                              min_gap_hours=2.0 / 3600.0):
     """
     Purpose: Build per-position local-gap targets for the time_to_neighbour aux.
-    Method:  For each masked position, gap = min(t − t_prev_unmasked,
-             t_next_unmasked − t). Distances computed over normalised abs_ts
-             (hours / 336) and rescaled to hours / max_hours so the regression
-             target sits roughly in [0, 1].
+    Method:  For each masked position, target = time gap (hours) to the nearest
+             UNMASKED *non-adjacent* event, i.e. the nearest unmasked event whose
+             absolute time differs by more than ``min_gap_hours`` (default 2 s —
+             chosen empirically by cutoff sweep: target std plateaus at ~0.109
+             from 2 s onward [vs 0.094 at 0 s, degenerate floor 0.02]; 2 s skips
+             exact-simultaneous labs + the small sub-2 s TAK-ordering offset tail
+             while keeping the local temporal rhythm). Rescaled to hours/max_hours.
 
-             Fully vectorised: ``cummax`` of (t · unmasked) gives the most
-             recent unmasked time to the left of every position; reversed
-             ``cummin`` gives the nearest unmasked time to the right.
+             Rationale: the previous definition used the immediately-adjacent
+             unmasked event (min of prev/next gap). EMR events cluster at near-
+             identical timestamps, so that target was near-degenerate (std≈0.02)
+             — a constant predictor solved it and the aux carried no signal.
+             Excluding sub-30-min neighbours restores a non-trivial target
+             (std≈0.1–0.2), giving the backbone real local-temporal structure to
+             learn. (MSE form and /max_hours rescale unchanged.)
+
+             Implementation: vectorised O(T²) masked-min over pairwise |Δt|.
+             T is bounded and this is the same order as attention, computed once
+             per batch.
 
     Args:
-        abs_ts    (FloatTensor): [B, T] normalised abs timestamps (t / 336 h).
-        pad_mask  (BoolTensor):  [B, T] True at non-PAD positions.
-        mlm_mask  (BoolTensor):  [B, T] True at MLM-masked positions.
-        max_hours (float):       rescale denominator.
+        abs_ts        (FloatTensor): [B, T] normalised abs timestamps (t / 336 h).
+        pad_mask      (BoolTensor):  [B, T] True at non-PAD positions.
+        mlm_mask      (BoolTensor):  [B, T] True at MLM-masked positions.
+        max_hours     (float):       rescale denominator.
+        min_gap_hours (float):       exclude unmasked neighbours closer than this
+                                     (the "non-adjacent" cutoff).
 
     Returns:
-        target  (FloatTensor): [B, T] local gap normalised to [0, ~1].
-        valid   (BoolTensor):  [B, T] positions that contribute to the loss
-                              (masked, non-PAD, with at least one unmasked
-                              neighbour in the sequence).
+        target  (FloatTensor): [B, T] local gap normalised to [0, ~5].
+        valid   (BoolTensor):  [B, T] masked, non-PAD positions that have at
+                              least one unmasked neighbour > min_gap_hours away.
     """
-    unmasked = pad_mask & (~mlm_mask)
-    inf = abs_ts.new_full(abs_ts.shape, float("inf"))
+    unmasked = pad_mask & (~mlm_mask)                                  # [B, T]
+    # Pairwise absolute time gaps in hours.
+    dt_hours = (abs_ts.unsqueeze(2) - abs_ts.unsqueeze(1)).abs() * 336.0   # [B, T, T]
+    # Candidate neighbours j: unmasked and strictly more than min_gap_hours away.
+    cand = unmasked.unsqueeze(1) & (dt_hours > min_gap_hours)          # [B, T, T]
+    masked_dt = torch.where(cand, dt_hours, dt_hours.new_full((), float("inf")))
+    gap_hours, _ = masked_dt.min(dim=2)                               # [B, T]
 
-    # left-most reachable t (most recent unmasked time ≤ i) via cummax
-    t_left = torch.where(unmasked, abs_ts, -inf)
-    t_left = torch.cummax(t_left, dim=1).values
-
-    # right-most reachable t (nearest unmasked time ≥ i) via reversed cummin
-    t_right_full = torch.where(unmasked, abs_ts, inf)
-    t_right = torch.cummin(t_right_full.flip(1), dim=1).values.flip(1)
-
-    # normalised-time gaps → hours → fraction of `max_hours`
-    left_gap_hours  = (abs_ts - t_left) * 336.0
-    right_gap_hours = (t_right - abs_ts) * 336.0
-
-    has_left  = (t_left  > -float("inf"))
-    has_right = (t_right <  float("inf"))
-
-    only_left  = has_left & (~has_right)
-    only_right = has_right & (~has_left)
-
-    gap_hours = torch.where(only_left,  left_gap_hours,
-                  torch.where(only_right, right_gap_hours,
-                  torch.minimum(left_gap_hours, right_gap_hours)))
-    gap_hours = gap_hours.clamp_min(0.0)
-
-    valid  = pad_mask & mlm_mask & (has_left | has_right)
+    has_nb = torch.isfinite(gap_hours)
+    valid = pad_mask & mlm_mask & has_nb
+    gap_hours = torch.where(has_nb, gap_hours, torch.zeros_like(gap_hours))
     target = (gap_hours / max_hours).clamp(0.0, 5.0)
     return target, valid
 
@@ -1622,14 +1622,19 @@ def build_patient_labels(model, batch, training_settings, device):
     Method:  For each outcome k, label[b, k] = 1 iff the outcome appears
              anywhere in the GT trajectory of patient b. gt_time[b, k] is the
              first occurrence in hours from sequence start, clamped to the
-             training horizon. Both come straight from ``position_ids`` /
-             ``abs_ts`` — no extra collate needed.
+             training horizon. When the batch carries the un-truncated
+             ``full_position_ids`` / ``full_abs_ts`` (Phase-3 input-truncated
+             view), labels are derived from those so the prediction horizon
+             matches evaluation.py; otherwise they come from the same
+             ``position_ids`` / ``abs_ts`` the model consumed (Phase 1/2,
+             eval).
 
     Args:
         model              : InterveneEncoder (uses ``outcome_names`` and the
                              tokenizer for the outcome → token-id mapping).
         batch              : dict with ``position_ids`` [B, T] and ``abs_ts``
-                             [B, T] (normalised by 336 h).
+                             [B, T] (normalised by 336 h). May also carry
+                             ``full_position_ids`` / ``full_abs_ts`` (Phase 3).
         training_settings  : config — uses ``outcome_horizon_hours_p3`` for
                              the label clip (default 336 h).
         device             : torch device.
@@ -1646,17 +1651,35 @@ def build_patient_labels(model, batch, training_settings, device):
     )                                                              # [K]
     K = outcome_ids.numel()
 
-    pos_ids = batch["position_ids"]                                # [B, T]
-    abs_ts  = batch["abs_ts"]                                      # [B, T] normalised
+    # Prefer the un-truncated trajectory (Phase-3 input-truncated batches
+    # carry it explicitly). Falls back to the input sequence otherwise so
+    # Phase 1/2 and eval-time call sites are unchanged.
+    if "full_position_ids" in batch and "full_abs_ts" in batch:
+        pos_ids = batch["full_position_ids"]                       # [B, T_full]
+        abs_ts  = batch["full_abs_ts"]                             # [B, T_full] normalised
+    else:
+        pos_ids = batch["position_ids"]                            # [B, T]
+        abs_ts  = batch["abs_ts"]                                  # [B, T] normalised
     pad_mask = pos_ids != tok.pad_token_id                          # [B, T]
 
     # match[b, t, k] = 1 iff position (b, t) is the k-th outcome token, non-pad.
     match = (pos_ids.unsqueeze(-1) == outcome_ids.view(1, 1, K)) & pad_mask.unsqueeze(-1)
+
+    # Restrict positives to events occurring AFTER the input observation
+    # window (default 48 h). Events inside the seed are observed tokens the
+    # model receives directly — treating them as positive labels trivially
+    # leaks the answer and inflates risk AUPRC, especially for HYPER /
+    # SEVERE_HYPER which often fire within 0–48 h. STraTS / GRU-D already
+    # use this post-window-only convention in their preprocess, so this
+    # restores a fair head-to-head label definition.
+    t_hours = abs_ts.unsqueeze(-1) * 336.0                          # [B, T, 1]
+    min_event_t = float(training_settings.get("outcome_min_event_hours_p3", 48.0))
+    match = match & (t_hours > min_event_t)                         # [B, T, K]
+
     present = match.any(dim=1)                                     # [B, K]
     labels  = present.float()
 
     # First occurrence time per (b, k): mask non-matches with +inf, then min.
-    t_hours = abs_ts.unsqueeze(-1) * 336.0                          # [B, T, 1]
     huge = torch.full_like(t_hours, float("inf"))
     t_masked = torch.where(match, t_hours, huge)
     first_t, _ = t_masked.min(dim=1)                                # [B, K]
