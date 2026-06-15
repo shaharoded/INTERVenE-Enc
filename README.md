@@ -36,6 +36,11 @@ root/
 │   ├── train/
 │   └── test/
 ├── unittests/                         # Unit and integration tests (dataset / model / utils)
+├── xai/                               # Explainability layer (sparse transcoders + per-outcome token attribution)
+│   ├── transcoder/                    # JumpReLU transcoder module + activation hooks + training
+│   ├── attribute.py                   # Swap-in hooks + grad×activation attribution
+│   ├── feature_concepts.py            # Per-feature corpus summaries (top firing concept_values)
+│   └── xai_demo.ipynb                 # Entry-point notebook: train transcoders → validate → SHAP-style per-outcome plot
 ├── evaluation.ipynb                   # Self-contained eval notebook — patient-level AUC/F1, peak MAE, length-of-stay, calibration & trajectory plots
 ├── README.md                         
 ├── .gitignore
@@ -335,6 +340,27 @@ Headline framing is **patient-level AUROC / AUPRC / F1** — each (patient, outc
 
 ---
 
+### 6. **`xai/`** – Explainability layer (transcoder-based)
+
+A self-contained, **non-invasive** explainability layer that lives entirely outside `intervene_enc/` and attaches to a trained encoder through forward hooks. The goal is to answer, at the token level, *which* concept-value tokens push each outcome's risk **up** or **down**.
+
+| Component | Role |
+|---|---|
+| `transcoder/transcoder.py` | `JumpReLUTranscoder` — a sparse cross-layer dictionary learner. Per encoder block we fit `mlp_out ≈ W_dec · JumpReLU(W_enc · mlp_in + b_enc; θ) + b_dec`, side-stepping the SwiGLU non-linearity entirely (we regress input→output, never decompose the gate). |
+| `transcoder/hooks.py` | Forward-hook activation collector that captures `(mlp_input, mlp_output)` pairs from every `AdaLNBlock.mlp` without touching the encoder source. |
+| `transcoder/train.py` | Fits one transcoder per encoder layer on the cached pairs. Loss = MSE + λ·L0 with JumpReLU's straight-through estimator on the threshold gate; no L1 shrinkage. |
+| `attribute.py` | `TranscoderHookManager` (swap-in / sniff hooks) and `feature_to_logit_attribution` (grad × activation of a risk logit w.r.t. each transcoder feature at every timeline position). Temporarily disables gradient checkpointing so backprop reaches the features. |
+| `feature_concepts.py` | Dataset-level utilities to summarise each feature by its top firing concept_values + dominant parent family. |
+| `xai_demo.ipynb` | End-to-end demo notebook — captures activations on a stratified patient subset, trains the transcoders, validates them (reconstruction R², L0 sparsity, swap-in logit fidelity), then renders a **SHAP-style grid** with one panel per outcome showing the top concept-value tokens that push risk up (red) and down (blue). |
+
+📌 **Why transcoders, not raw SAEs?** The SwiGLU MLP gates a value stream by `SiLU(gate)`, which is hard to decompose internally. A transcoder regresses the I/O map directly through a sparse bottleneck, so the gating is implicit — we never have to factorise the non-linearity. Each feature becomes a clean "this concept-value fires this sparse direction" probe.
+
+📌 **Why BERT-style still works.** Token attribution only requires (a) a scalar output and (b) a differentiable path back to the features — encoder-vs-decoder is irrelevant to autograd. Because `TaskHeads` pools attention across *all* non-pad positions, gradients distribute over the whole patient timeline — richer than next-token attribution in a GPT.
+
+📌 **Caveats.** The plot uses first-order grad × activation (linear-attribution proxy, what Captum calls `InputXGradient`). The swap-fidelity scatter (§6 of the notebook) is the load-bearing sanity check — if logits under the transcoder swap track the real logits, the attribution is faithful to the actual model.
+
+---
+
 ## ✅ Model Capabilities
 
 - ✔️ **Handles irregular time-series data** using relative deltas and Time2Vec.
@@ -366,6 +392,11 @@ This work builds on and adapts ideas from the following sources:
   The attention module uses rotary position embeddings adapted to continuous/absolute timestamps (temporal RoPE) to inject time into Q/K rotations.  
   📄 *J. Su, Y. Lu, S. Pan, A. Murtadha, B. Wen. "RoFormer: Enhanced Transformer with Rotary Position Embedding." arXiv:2104.09864.*  
   [arXiv:2104.09864](https://arxiv.org/abs/2104.09864)
+
+- **JumpReLU SAEs / Transcoders** (Rajamanoharan et al., 2024):
+  The `xai/` explainability layer uses JumpReLU-style sparse coders to learn per-MLP feature dictionaries. JumpReLU's hard-thresholded gate gives clean L0 control with no L1 shrinkage and a single per-feature threshold to plot.
+  📄 *S. Rajamanoharan, A. Conmy, L. Smith, T. Lieberum, V. Varma, J. Kramár, R. Shah, N. Nanda. "Jumping Ahead: Improving Reconstruction Fidelity with JumpReLU Sparse Autoencoders." arXiv:2407.14435.*
+  [arXiv:2407.14435](https://arxiv.org/abs/2407.14435)
 
 - **AdaLN-Zero** (Peebles, W., & Xie, S., 2023):  
   Inspired by the paper "Scalable diffusion models with transformers", I added a customized block to the transformer designed to allow static context influence all generation steps. The [paper](https://openaccess.thecvf.com/content/ICCV2023/papers/Peebles_Scalable_Diffusion_Models_with_Transformers_ICCV_2023_paper.pdf) uses this method to inform the diffusion model of the label of the image it should generate.
