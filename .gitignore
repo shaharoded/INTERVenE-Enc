@@ -5,6 +5,7 @@ emr_model.zip
 venv/
 .venv/
 tmp-docs/
+data/source/
 __pycache__/
 checkpoints/
 transform_emr_temp/
