@@ -145,7 +145,7 @@ TRAINING_SETTINGS = {
     # [MASK] (BERT-style), targets/labels computed from the un-noised
     # batch. Forces the model to use multi-source signal, helps rare
     # outcomes. 0 disables.
-    "phase3_cbm_p": 0.0,    # was 0.25; remove input noise for the clean-baseline retry
+    "phase3_cbm_p": 0.15,
     # phase3_pool_dropout — dropout inside the Phase-3 attention pool +
     # shared MLP. ``None`` inherits the backbone's MODEL_CONFIG["dropout"].
     # 0.20 matches STraTS's attention_dropout.
