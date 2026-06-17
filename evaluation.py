@@ -553,6 +553,40 @@ def evaluate_on_test_set(model, tokenizer, test_temporal_raw, test_ctx_raw,
 # Bootstrap variance for a trained checkpoint
 # ===========================================================================
 
+def _f1_from_scores(scores, labels):
+    """
+    Purpose: Compute max-F1 (PR-sweep) and F1@0.5 from a (scores, labels) pair.
+    Method:  precision_recall_curve to enumerate operating points; max-F1 over
+             the swept thresholds; F1@0.5 from the fixed 0.5 cut directly so it
+             matches the point-estimate definition used by `per_patient_auc`.
+             Returns NaN for either when n_pos==0 or n_neg==0.
+
+    Args:
+        scores (np.ndarray): predicted P_<outcome> over the resampled patients.
+        labels (np.ndarray): {0,1} labels aligned with scores.
+
+    Returns:
+        (max_f1, f1_at_0_5) as floats (or NaN if degenerate).
+    """
+    n_pos = int(labels.sum()); n_neg = len(labels) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return float("nan"), float("nan")
+    prec, rec, _ = precision_recall_curve(labels, scores)
+    denom = prec + rec
+    f1_arr = np.zeros_like(prec)
+    nz = denom > 0
+    f1_arr[nz] = 2 * prec[nz] * rec[nz] / denom[nz]
+    max_f1 = float(f1_arr.max())
+    pred_05 = scores >= 0.5
+    tp = int((pred_05 & (labels == 1)).sum())
+    fp = int((pred_05 & (labels == 0)).sum())
+    fn = int((~pred_05 & (labels == 1)).sum())
+    prec_05 = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    rec_05  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1_05 = 2 * prec_05 * rec_05 / (prec_05 + rec_05) if (prec_05 + rec_05) > 0 else 0.0
+    return max_f1, float(f1_05)
+
+
 def bootstrap_evaluate(model, tokenizer, test_temporal_raw, test_ctx_raw,
                       scaler, checkpoint_dir, batch_size, B=2000, seed=42):
     """
@@ -560,10 +594,11 @@ def bootstrap_evaluate(model, tokenizer, test_temporal_raw, test_ctx_raw,
     Method:  Run `evaluate_on_test_set` ONCE to get per-patient predictions +
              ground-truth, then bootstrap over the held-out TEST PATIENTS
              (resample with replacement, B reps) to produce 95% percentile CIs
-             for the support-weighted AUROC / AUPRC headline, per-outcome
-             AUROC/AUPRC, and length-of-stay MAE (RELEASE-only + all-patients
-             terminal-time supplementary). Single model, single inference pass —
-             far cheaper than re-seeding the full pipeline.
+             for the support-weighted AUROC / AUPRC / max-F1 / F1@0.5 headline,
+             per-outcome AUROC/AUPRC/max-F1/F1@0.5/time-MAE, and length-of-stay
+             MAE (RELEASE-only + all-patients terminal-time supplementary).
+             Single model, single inference pass — far cheaper than re-seeding
+             the full pipeline. Point estimates are unchanged.
 
     Args:
         model               : trained InterveneEncoder with task heads attached.
@@ -578,8 +613,9 @@ def bootstrap_evaluate(model, tokenizer, test_temporal_raw, test_ctx_raw,
 
     Returns:
         dict with the same headline keys plus *_ci_lo / *_ci_hi / *_boot_mean
-        / *_boot_sd entries and per_outcome_ci DataFrame. Also prints a
-        grep-friendly summary block.
+        / *_boot_sd entries and per_outcome_ci DataFrame (with auroc/auprc/
+        max_f1/f1_at_0_5/time_mae columns). Also prints a grep-friendly summary
+        block.
     """
     import time
     from intervene_enc.config.dataset_config import DEATH_TOKEN
@@ -595,10 +631,16 @@ def bootstrap_evaluate(model, tokenizer, test_temporal_raw, test_ctx_raw,
     pids = list(predictions.index)
     N = len(pids)
     print(f"[boot] point estimate: AUPRC_w={res['patient_auprc_weighted']:.4f} "
-          f"AUROC_w={res['patient_auroc_weighted']:.4f} | N_test={N}")
+          f"AUROC_w={res['patient_auroc_weighted']:.4f} "
+          f"maxF1_w={res['patient_max_f1_weighted']:.4f} "
+          f"F1@0.5_w={res['patient_f1_at_0_5_weighted']:.4f} | N_test={N}")
 
-    # Precompute aligned (scores, labels) per outcome.
+    # Precompute aligned (scores, labels) per outcome + per-outcome time-error
+    # array of length N (NaN where the patient has no GT episode of that
+    # outcome — those entries are filtered inside each bootstrap resample, so
+    # the time-MAE CI is over the resample's positive-cohort intersection).
     cols = {}
+    time_err = {}
     for name in outcome_names:
         pcol = f"P_{name}"
         if pcol not in predictions.columns:
@@ -607,40 +649,56 @@ def bootstrap_evaluate(model, tokenizer, test_temporal_raw, test_ctx_raw,
         labels = np.array([int(len(gt_episodes.get(p, {}).get(name, [])) > 0)
                            for p in pids], dtype=np.int64)
         cols[name] = (scores, labels)
+        tcol = f"T_{name}"
+        if tcol in predictions.columns:
+            errs = np.full(N, np.nan, dtype=float)
+            tarr = predictions[tcol].to_numpy()
+            for i, pid in enumerate(pids):
+                episodes = gt_episodes.get(pid, {}).get(name, [])
+                if not episodes:
+                    continue
+                pred_t = float(tarr[i])
+                nearest = min(episodes, key=lambda t: abs(pred_t - t))
+                errs[i] = abs(pred_t - float(nearest))
+            time_err[name] = errs
 
     min_pos = _min_positives(N)
 
-    def _weighted_stat(idx):
-        aurocs, auprcs, weights = [], [], []
-        for nm, (sc, lb) in cols.items():
-            s, l = sc[idx], lb[idx]
-            n_pos = int(l.sum()); n_neg = len(l) - n_pos
-            if n_pos < min_pos or n_neg < min_pos:
-                continue
-            aurocs.append(roc_auc_score(l, s))
-            auprcs.append(average_precision_score(l, s))
-            weights.append(n_pos)
-        if not weights:
-            return np.nan, np.nan
-        w = np.array(weights, float); w /= w.sum()
-        return float((np.array(aurocs) * w).sum()), float((np.array(auprcs) * w).sum())
-
-    per_out = {name: {"auroc": [], "auprc": []} for name in cols}
+    per_out = {name: {"auroc": [], "auprc": [], "max_f1": [],
+                      "f1_at_0_5": [], "time_mae": []} for name in cols}
     boot_auroc, boot_auprc = [], []
+    boot_maxf1_w, boot_f105_w = [], []
     rng = np.random.RandomState(seed)
     t0 = time.time()
     for b in range(B):
         idx = rng.randint(0, N, size=N)
-        a, p = _weighted_stat(idx)
-        if not (np.isnan(a) or np.isnan(p)):
-            boot_auroc.append(a); boot_auprc.append(p)
+        aurocs, auprcs, maxf1s, f105s, weights = [], [], [], [], []
         for nm, (sc, lb) in cols.items():
             s, l = sc[idx], lb[idx]
             n_pos = int(l.sum()); n_neg = len(l) - n_pos
             if n_pos < min_pos or n_neg < min_pos:
                 continue
-            per_out[nm]["auroc"].append(roc_auc_score(l, s))
-            per_out[nm]["auprc"].append(average_precision_score(l, s))
+            au = roc_auc_score(l, s)
+            ap = average_precision_score(l, s)
+            mf1, f105 = _f1_from_scores(s, l)
+            aurocs.append(au); auprcs.append(ap)
+            maxf1s.append(mf1); f105s.append(f105)
+            weights.append(n_pos)
+            per_out[nm]["auroc"].append(au)
+            per_out[nm]["auprc"].append(ap)
+            per_out[nm]["max_f1"].append(mf1)
+            per_out[nm]["f1_at_0_5"].append(f105)
+            if nm in time_err:
+                te = time_err[nm][idx]
+                valid = te[~np.isnan(te)]
+                if valid.size > 0:
+                    per_out[nm]["time_mae"].append(float(valid.mean()))
+        if weights:
+            w = np.array(weights, float); w /= w.sum()
+            boot_auroc.append(float((np.array(aurocs) * w).sum()))
+            boot_auprc.append(float((np.array(auprcs) * w).sum()))
+            boot_maxf1_w.append(float((np.array(maxf1s) * w).sum()))
+            boot_f105_w.append(float((np.array(f105s) * w).sum()))
     print(f"[boot] {B} resamples in {time.time()-t0:.1f}s")
 
     # Length-of-stay bootstrap: RELEASE-only + supplementary all-patients-terminal.
@@ -677,8 +735,10 @@ def bootstrap_evaluate(model, tokenizer, test_temporal_raw, test_ctx_raw,
     print(f"\n=== BOOTSTRAP 95pct CI (patient resample, B={B}) ===")
     out = dict(res)
     for label, point, arr in [
-        ("patient_auprc_weighted", res["patient_auprc_weighted"], boot_auprc),
-        ("patient_auroc_weighted", res["patient_auroc_weighted"], boot_auroc),
+        ("patient_auprc_weighted",     res["patient_auprc_weighted"],     boot_auprc),
+        ("patient_auroc_weighted",     res["patient_auroc_weighted"],     boot_auroc),
+        ("patient_max_f1_weighted",    res["patient_max_f1_weighted"],    boot_maxf1_w),
+        ("patient_f1_at_0_5_weighted", res["patient_f1_at_0_5_weighted"], boot_f105_w),
     ]:
         if not arr:
             print(f"{label}: (insufficient successful resamples)")
@@ -707,25 +767,50 @@ def bootstrap_evaluate(model, tokenizer, test_temporal_raw, test_ctx_raw,
         print(f"length_of_stay_mae_hours (ALL-patients terminal time, n={los_term_arr.size}): "
               f"boot_mean={mean:.4f}  95%CI=[{lo:.4f}, {hi:.4f}]  sd={sd:.4f}")
 
-    # Per-outcome CI table.
+    # Per-outcome CI table. Reports AUROC/AUPRC/max-F1/F1@0.5 (rank+threshold
+    # metrics, resampled jointly per outcome) and the per-outcome time-head MAE
+    # (resampled over the positive-cohort intersection of each resample).
     print("\n--- per-outcome 95% CI ---")
-    print(f"{'outcome':<34}{'AUROC [95% CI]':<30}{'AUPRC [95% CI]'}")
+    print(f"{'outcome':<32}{'AUROC':<22}{'AUPRC':<22}"
+          f"{'maxF1':<22}{'F1@0.5':<22}{'time-MAE (h)'}")
     per_out_rows = []
     for name in cols:
-        ar, pr = per_out[name]["auroc"], per_out[name]["auprc"]
+        ar  = per_out[name]["auroc"]
+        pr  = per_out[name]["auprc"]
+        mf  = per_out[name]["max_f1"]
+        ff  = per_out[name]["f1_at_0_5"]
+        tm  = per_out[name]["time_mae"]
         if not ar:
-            print(f"{name:<34}(insufficient positives in resamples)")
-            per_out_rows.append({"outcome": name, "auroc_mean": np.nan,
-                                "auroc_lo": np.nan, "auroc_hi": np.nan,
-                                "auprc_mean": np.nan,
-                                "auprc_lo": np.nan, "auprc_hi": np.nan})
+            print(f"{name:<32}(insufficient positives in resamples)")
+            per_out_rows.append({"outcome": name,
+                                 "auroc_mean": np.nan, "auroc_lo": np.nan, "auroc_hi": np.nan,
+                                 "auprc_mean": np.nan, "auprc_lo": np.nan, "auprc_hi": np.nan,
+                                 "max_f1_mean": np.nan, "max_f1_lo": np.nan, "max_f1_hi": np.nan,
+                                 "f1_at_0_5_mean": np.nan, "f1_at_0_5_lo": np.nan, "f1_at_0_5_hi": np.nan,
+                                 "time_mae_mean": np.nan, "time_mae_lo": np.nan, "time_mae_hi": np.nan})
             continue
-        alo, ahi, am, _ = _ci(ar); plo, phi, pm, _ = _ci(pr)
+        alo, ahi, am, _ = _ci(ar)
+        plo, phi, pm, _ = _ci(pr)
+        mlo, mhi, mm, _ = _ci(mf)
+        flo, fhi, fm, _ = _ci(ff)
+        if tm:
+            tlo, thi, tmean, _ = _ci(tm)
+        else:
+            tlo, thi, tmean = float("nan"), float("nan"), float("nan")
         per_out_rows.append({"outcome": name,
-                            "auroc_mean": float(am), "auroc_lo": float(alo), "auroc_hi": float(ahi),
-                            "auprc_mean": float(pm), "auprc_lo": float(plo), "auprc_hi": float(phi)})
-        print(f"{name:<34}{am:.3f} [{alo:.3f},{ahi:.3f}]      "
-              f"{pm:.3f} [{plo:.3f},{phi:.3f}]")
+                             "auroc_mean": float(am), "auroc_lo": float(alo), "auroc_hi": float(ahi),
+                             "auprc_mean": float(pm), "auprc_lo": float(plo), "auprc_hi": float(phi),
+                             "max_f1_mean": float(mm), "max_f1_lo": float(mlo), "max_f1_hi": float(mhi),
+                             "f1_at_0_5_mean": float(fm), "f1_at_0_5_lo": float(flo), "f1_at_0_5_hi": float(fhi),
+                             "time_mae_mean": float(tmean), "time_mae_lo": float(tlo), "time_mae_hi": float(thi)})
+        tm_str = (f"{tmean:.2f} [{tlo:.2f},{thi:.2f}]"
+                  if not np.isnan(tmean) else "—")
+        print(f"{name:<32}"
+              f"{am:.3f} [{alo:.3f},{ahi:.3f}]  "
+              f"{pm:.3f} [{plo:.3f},{phi:.3f}]  "
+              f"{mm:.3f} [{mlo:.3f},{mhi:.3f}]  "
+              f"{fm:.3f} [{flo:.3f},{fhi:.3f}]  "
+              f"{tm_str}")
     out["per_outcome_ci"] = pd.DataFrame(per_out_rows).set_index("outcome")
     print("\n[boot] done.")
     return out
