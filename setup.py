@@ -11,6 +11,7 @@ setup(
         "scikit-learn",
         "tqdm",
         "matplotlib",
-        "openpyxl"
+        "openpyxl",
+        "joblib"
     ],
 )

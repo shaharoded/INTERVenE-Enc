@@ -180,28 +180,60 @@ python -m pytest -q -s unittests/
 
 ## 📦 Packaging Notes
 
-To package without data/checkpoints:
+Builds a deployment zip for a remote machine (VM / GPU server) containing the **core package, the XAI layer, the end-to-end evaluation notebook and the install metadata** — and nothing else. Data, checkpoints, unit-tests, images and git metadata are all excluded: the target environment trains from scratch on its own dataset.
 
 ```powershell
-# Clean up any existing temp folder
-Remove-Item -Recurse -Force .\intervene_enc_temp -ErrorAction SilentlyContinue
+# --- Config -------------------------------------------------------------
+$Stage = ".\intervene_enc_deploy"
+$Zip   = ".\intervene_enc_deploy.zip"
 
-# Recreate the temp folder
-New-Item -ItemType Directory -Path .\intervene_enc_temp | Out-Null
+# --- Clean & recreate the staging folder --------------------------------
+Remove-Item -Recurse -Force $Stage, $Zip -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path $Stage | Out-Null
 
-# Copy only what's needed
-Copy-Item -Path .\intervene_enc -Destination .\intervene_enc_temp -Recurse
-Copy-Item -Path .\setup.py, .\evaluation.ipynb, .\README.md, .\requirements.txt -Destination .\intervene_enc_temp
+# --- Copy source trees (config/ + tak-repo-portable.json ride along) ----
+Copy-Item -Path .\intervene_enc -Destination $Stage -Recurse   # core package
+Copy-Item -Path .\xai           -Destination $Stage -Recurse   # explainability layer
 
-# Remove __pycache__ folders (platform-specific bytecode, not for distribution)
-Get-ChildItem -Path .\intervene_enc_temp -Filter __pycache__ -Recurse -Directory | Remove-Item -Recurse -Force
+# --- Copy notebooks + install metadata ----------------------------------
+Copy-Item -Path .\evaluation.ipynb, `
+                .\setup.py, `
+                .\pyproject.toml, `
+                .\requirements.txt, `
+                .\README.md, `
+                .\License, `
+                .\CITATION.cff `
+          -Destination $Stage
 
-# Zip it
-Compress-Archive -Path .\intervene_enc_temp\* -DestinationPath .\intervene_enc.zip -Force
+# --- Empty runtime folders the configs resolve to (avoid path errors) ---
+'data\train', 'data\test', 'data\source', 'checkpoints' | ForEach-Object {
+    New-Item -ItemType Directory -Path (Join-Path $Stage $_) -Force | Out-Null
+    New-Item -ItemType File -Path (Join-Path $Stage "$_\.gitkeep") -Force | Out-Null
+}
 
-# Clean up
-Remove-Item -Recurse -Force .\intervene_enc_temp
+# --- Strip build/runtime artefacts (platform-specific, not distributable)
+Get-ChildItem -Path $Stage -Include __pycache__, .ipynb_checkpoints, *.egg-info `
+              -Recurse -Directory | Remove-Item -Recurse -Force
+Get-ChildItem -Path $Stage -Include *.pyc, *.pyo -Recurse -File | Remove-Item -Force
+
+# --- Zip & clean up ------------------------------------------------------
+Compress-Archive -Path "$Stage\*" -DestinationPath $Zip -Force
+Remove-Item -Recurse -Force $Stage
+
+Write-Host "Packaged -> $Zip ($([math]::Round((Get-Item $Zip).Length/1MB,2)) MB)"
 ```
+
+On the remote machine, unzip and install from the extracted root:
+
+```bash
+unzip intervene_enc_deploy.zip -d intervene-enc-deploy
+cd intervene-enc-deploy
+pip install -e .
+```
+
+> **Note.** `pyproject.toml` installs only `intervene_enc*` as a package — `xai/` is intentionally left as a top-level source folder and is imported (`from xai.attribute import ...`) by resolving against the repo root. Run `xai/xai_demo.ipynb` and `evaluation.ipynb` with the extracted root as the working directory.
+>
+> **Data.** Drop your temporal/context CSVs into `data/train/` and `data/test/` (see `dataset_config.py` for the expected filenames), and replace `intervene_enc/config/tak-repo-portable.json` if the target dataset uses a different concept hierarchy.
 
 ---
 

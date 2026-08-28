@@ -15,7 +15,8 @@ dependencies = [
     "tqdm",
     "pytest",
     "pytest-order",
-    "openpyxl"
+    "openpyxl",
+    "joblib"
 ]
 
 [tool.pytest.ini_options]
